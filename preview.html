@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Celayix Shift Auto-Scheduler</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 2rem 1rem;
+    }
+
+    .app {
+      width: 100%;
+      max-width: 980px;
+      border-radius: 1.5rem;
+      background: radial-gradient(circle at top left, #1e293b, #020617 55%);
+      padding: 1.75rem;
+      box-shadow: 0 20px 60px rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.75rem;
+    }
+
+    .app-title-group h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .app-title-group p {
+      font-size: 0.9rem;
+      color: #9ca3af;
+      margin-top: 0.25rem;
+    }
+
+    .status-pill {
+      font-size: 0.8rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 999px;
+      background: rgba(22, 163, 74, 0.15);
+      color: #bbf7d0;
+      border: 1px solid rgba(22, 163, 74, 0.7);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1.15fr 1.5fr;
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: rgba(15, 23, 42, 0.9);
+      border-radius: 1.1rem;
+      padding: 1.1rem 1.2rem;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+    }
+
+    .card h2 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      color: #e5e7eb;
+    }
+
+    .card-sub {
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin-bottom: 0.9rem;
+    }
+
+    .pref-list {
+      list-style: none;
+      font-size: 0.85rem;
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .pref-list li {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.45rem 0.6rem;
+      border-radius: 0.7rem;
+      background: rgba(30, 64, 175, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+    }
+
+    .pref-key {
+      font-weight: 500;
+      color: #bfdbfe;
+      min-width: 92px;
+    }
+
+    .log-list {
+      font-size: 0.8rem;
+      display: grid;
+      gap: 0.45rem;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .log-entry {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 0.45rem 0.5rem;
+      border-radius: 0.6rem;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(75, 85, 99, 0.7);
+    }
+
+    .log-meta {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+      color: #9ca3af;
+    }
+
+    .log-time {
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.75rem;
+    }
+
+    .log-tag {
+      font-size: 0.7rem;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+    }
+
+    .log-tag.ok {
+      background: rgba(22, 163, 74, 0.15);
+      color: #bbf7d0;
+      border: 1px solid rgba(22, 163, 74, 0.8);
+    }
+
+    .log-tag.dry {
+      background: rgba(59, 130, 246, 0.15);
+      color: #bfdbfe;
+      border: 1px solid rgba(59, 130, 246, 0.7);
+    }
+
+    .log-text {
+      color: #e5e7eb;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-top: 0.4rem;
+      font-size: 0.8rem;
+      color: #9ca3af;
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.6);
+      background: rgba(15, 23, 42, 0.9);
+    }
+
+    .toggle-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #22c55e;
+    }
+
+    .pill {
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.5);
+    }
+
+    @media (max-width: 720px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="app-header">
+      <div class="app-title-group">
+        <h1>Celayix Shift Auto-Scheduler</h1>
+        <p>Monitors available shifts in real time and auto-accepts matches based on your rules.</p>
+      </div>
+      <span class="status-pill">● Live — Dry-Run Mode</span>
+    </header>
+
+    <section class="layout">
+      <section class="card">
+        <h2>Preference Profile — Aria</h2>
+        <p class="card-sub">These rules decide which Celayix shifts are auto-accepted.</p>
+        <ul class="pref-list">
+          <li>
+            <span class="pref-key">Location</span>
+            <span>Aria Resort &amp; Casino — Security team only</span>
+          </li>
+          <li>
+            <span class="pref-key">Time Window</span>
+            <span>Shifts starting between 08:00 and 18:00, avoid graveyard</span>
+          </li>
+          <li>
+            <span class="pref-key">Min. Hours</span>
+            <span>4 hours per shift, prefer 8-hour blocks</span>
+          </li>
+          <li>
+            <span class="pref-key">Conflict</span>
+            <span>Skip shifts overlapping university class schedule (synced calendar)</span>
+          </li>
+        </ul>
+
+        <div class="controls">
+          <div class="toggle">
+            <span class="toggle-dot"></span>
+            <span>Monitoring Celayix</span>
+          </div>
+          <span class="pill">Poll interval: 60s</span>
+          <span class="pill">Mode: Dry-Run</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Recent Actions</h2>
+        <p class="card-sub">Preview of what the bot is doing against your Celayix account.</p>
+        <div class="log-list">
+          <article class="log-entry">
+            <div class="log-meta">
+              <span class="log-time">19:02:11</span>
+              <span class="log-tag dry">DRY-RUN</span>
+            </div>
+            <p class="log-text">Would accept “Security — Aria East Tower (08:00–16:00)”.</p>
+          </article>
+          <article class="log-entry">
+            <div class="log-meta">
+              <span class="log-time">19:01:09</span>
+              <span class="log-tag dry">DRY-RUN</span>
+            </div>
+            <p class="log-text">Rejected “Security — Downtown” (location not in profile).</p>
+          </article>
+          <article class="log-entry">
+            <div class="log-meta">
+              <span class="log-time">19:00:02</span>
+              <span class="log-tag ok">LOGIN</span>
+            </div>
+            <p class="log-text">Authenticated to Celayix and loaded Available Shifts.</p>
+          </article>
+          <article class="log-entry">
+            <div class="log-meta">
+              <span class="log-time">18:59:58</span>
+              <span class="log-tag ok">SCHEDULE</span>
+            </div>
+            <p class="log-text">Scheduler started — polling every 60 seconds.</p>
+          </article>
+        </div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>
