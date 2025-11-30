@@ -1,2 +1,4 @@
 venv/
 .env
+dummy_login.html
+dummy_shifts.html
