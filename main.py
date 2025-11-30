@@ -66,6 +66,78 @@ async def login(page):
     await page.wait_for_load_state("networkidle")
 
 
+async def try_book_shifts_optimized(page, dry_run=True, timeout=5000):
+    """
+    OPTIMIZED for hot-drop scenarios:
+    - Aggressively polls for shift cards (every 10-50ms)
+    - Clicks first matching shift IMMEDIATELY when it appears
+    - Pre-prepared selectors for minimal latency
+    - No parsing all shifts first - click-first strategy
+    """
+    start_time = time.monotonic()
+    card_selector = "div.cx-list-item.pointer-cursor"
+    schedule_btn_selector = "button.cx-button:has-text('Schedule me')"
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 🔥 HOT-DROP MODE: Aggressively watching for shifts...")
+    
+    # Aggressive polling: check every 10ms for maximum speed
+    while (time.monotonic() - start_time) * 1000 < timeout:
+        # Check for shift cards immediately
+        cards = await page.query_selector_all(card_selector)
+        
+        if cards:
+            # Found shift(s)! Click the first one immediately
+            first_card = cards[0]
+            
+            # Quick validation: get basic info
+            try:
+                card_text = (await first_card.inner_text()).strip()
+                print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] ⚡ SHIFT DETECTED: {card_text[:60]}...")
+            except:
+                pass
+            
+            if dry_run:
+                print(f"    → DRY-RUN: would click shift card + 'Schedule me'")
+                return True
+            
+            # Click shift card IMMEDIATELY
+            click_start = time.monotonic()
+            await first_card.click()
+            click_duration = (time.monotonic() - click_start) * 1000
+            print(f"    → CLICKED shift card (took {click_duration:.1f}ms)")
+            
+            # Immediately look for Schedule me button (already have selector ready)
+            schedule_btn = await page.query_selector(schedule_btn_selector)
+            if schedule_btn:
+                schedule_start = time.monotonic()
+                await schedule_btn.click()
+                schedule_duration = (time.monotonic() - schedule_start) * 1000
+                total_duration = (time.monotonic() - start_time) * 1000
+                print(f"    → CLICKED 'Schedule me' (took {schedule_duration:.1f}ms)")
+                print(f"    ✅ TOTAL BOOKING TIME: {total_duration:.1f}ms from shift appearance")
+                return True
+            else:
+                print(f"    ⚠ Shift clicked but 'Schedule me' button not found yet")
+                # Fallback: wait a tiny bit and retry
+                await asyncio.sleep(0.05)
+                schedule_btn = await page.query_selector(schedule_btn_selector)
+                if schedule_btn:
+                    await schedule_btn.click()
+                    print(f"    → CLICKED 'Schedule me' (retry successful)")
+                    return True
+                else:
+                    print(f"    ✗ Could not find 'Schedule me' button")
+                    return False
+        
+        # No shifts yet - wait 10ms and check again (aggressive polling)
+        await asyncio.sleep(0.01)
+    
+    # Timeout - no shifts found
+    elapsed = (time.monotonic() - start_time) * 1000
+    print(f"    ⏱ No shifts found after {elapsed:.0f}ms of aggressive polling")
+    return False
+
+
 async def try_book_shifts(page, dry_run=True):
     shifts = await parse_shifts(page)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(shifts)} shift candidates")
@@ -226,16 +298,16 @@ async def wait_for_find_button_ready(page, timeout=15000):
         return False
 
 
-async def test_full_flow_dummy(dry_run=True, max_cycles=5):
+async def test_full_flow_dummy(dry_run=True, max_cycles=5, target_time=None, click_before_seconds=5):
     """
     Simulates the COMPLETE automation flow using the dummy page:
-    - Login (simulated - skipped for dummy page)
+    - Login
     - Navigate to self-schedule page
     - Set end date
-    - Initial Find click
+    - If target_time: Wait until precise time, then click Find
+    - If no target_time: Initial Find click, then loop
     - Wait for loading
     - Try to book shifts
-    - Loop: Wait for cooldown → Find → Loading → Book → Repeat
     
     This mirrors the real main_loop() but uses dummy page for testing.
     """
@@ -310,12 +382,51 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5):
         print("  ✓ Navigation completed, self-schedule page loaded")
         await asyncio.sleep(3)  # Delay after navigating to self-schedule to see the page
         
-        # Step 4: Set end date and run initial search (same as original: await apply_end_date_and_find(page, days_ahead=days_ahead))
-        print("\nSTEP 4: Set End Date and Initial Search")
+        # Step 4: Set end date (but don't click Find yet)
+        print("\nSTEP 4: Set End Date")
         print("  → Setting end date...")
         await asyncio.sleep(1)  # Delay before setting date
-        print("  → Calling apply_end_date_and_find(page, days_ahead=6)...")
-        await apply_end_date_and_find(page, days_ahead=6)
+        end = get_next_week_end(6)
+        end_str = format_celayix_date_short(end)
+        await page.fill('#selfschedule-endDate', end_str)
+        print(f"  ✓ End date set to {end_str}\n")
+
+        if target_time:
+            # Precise timing mode: wait until target time, then click Find
+            print(f"🎯 PRECISE TIMING MODE (HOT-DROP OPTIMIZED)")
+            print(f"   Target time (when shifts drop): {target_time}")
+            print(f"   Will click 'Find' {click_before_seconds} seconds before")
+            print(f"   Current time: {datetime.now().strftime('%H:%M:%S')}\n")
+            
+            # Wait until the precise moment and click Find
+            success = await click_find_at_precise_time(page, target_time, click_before_seconds)
+            if success:
+                # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
+                # Don't wait for networkidle - start aggressive polling right away
+                print("\n📋 HOT-DROP MODE: Aggressively watching for shifts (no networkidle wait)...")
+                
+                # Use optimized booking function that polls aggressively
+                booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
+                
+                if booking_success:
+                    print(f"\n✅ HOT-DROP BOOKING COMPLETED!")
+                else:
+                    print(f"\n⚠ No shifts found in hot-drop window")
+                
+                # Keep browser open to see results
+                print("\n⏸ Browser will stay open for 10 seconds to view results...")
+                await asyncio.sleep(10)
+                await browser.close()
+                return
+            else:
+                print(f"\n✗ Precise timing search failed")
+                await browser.close()
+                return
+        
+        # Normal mode: do initial search and loop
+        print("\nSTEP 5: Initial Search")
+        print("  → Clicking 'Find' button for initial search...")
+        await page.click('button.cx-button[type="submit"]')
         
         # Wait for loading to complete (dummy page specific)
         print("  → Waiting for loading to complete...")
@@ -329,17 +440,17 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5):
             await browser.close()
             return
         
-        # Step 5: Try to book shifts (initial attempt)
-        print("\nSTEP 5: Attempt to Book Shifts (Initial)")
+        # Step 6: Try to book shifts (initial attempt)
+        print("\nSTEP 6: Attempt to Book Shifts (Initial)")
         await try_book_shifts(page, dry_run=dry_run)
         
         # Track search time for cooldown
         last_search_time = time.monotonic()
         cycle_count = 0
 
-        # Step 6: Main loop - repeat search and booking
+        # Step 7: Main loop - repeat search and booking
         print("\n" + "="*70)
-        print("STEP 6: Main Loop - Continuous Search and Booking")
+        print("STEP 7: Main Loop - Continuous Search and Booking")
         print("="*70)
 
         while True:
@@ -544,6 +655,7 @@ async def wait_until_time(target_time, click_before_seconds=1.0):
     """
     Wait until a specific time, then return the exact moment to click.
     click_before_seconds: How many seconds before target_time to click (default 1 second)
+    Accounts for system delays to click exactly when clock shows the target second.
     """
     now = datetime.now()
     click_time = target_time - timedelta(seconds=click_before_seconds)
@@ -555,62 +667,80 @@ async def wait_until_time(target_time, click_before_seconds=1.0):
     wait_seconds = (click_time - now).total_seconds()
     print(f"⏰ Waiting {wait_seconds:.2f} seconds until {click_time.strftime('%H:%M:%S')} (shifts drop at {target_time.strftime('%H:%M:%S')})")
     
-    # Wait with high precision
-    await asyncio.sleep(wait_seconds)
+    # Wait with high precision, accounting for system delays
+    if wait_seconds > 0.5:
+        # For longer waits, use asyncio.sleep but leave a smaller buffer for precision
+        # Reduced buffer significantly to get much closer before busy-waiting
+        await asyncio.sleep(max(0, wait_seconds - 0.4))
     
     # Fine-tune to get as close as possible to the target
-    while datetime.now() < click_time:
-        remaining = (click_time - datetime.now()).total_seconds()
-        if remaining > 0.1:
-            await asyncio.sleep(remaining * 0.5)  # Sleep half the remaining time
+    # Account for click execution delay and system delays by aiming earlier
+    # 
+    # ADJUSTMENT GUIDE:
+    # - If clicking too LATE: Increase precision_buffer (e.g., 1000ms, 1500ms)
+    # - If clicking too EARLY: Decrease precision_buffer (e.g., 500ms, 300ms)
+    # This is subtracted from click_time, so larger = clicks earlier
+    precision_buffer = timedelta(milliseconds=4000)  # Adjust this if timing is still off (larger = clicks earlier)
+    target_click_time = click_time - precision_buffer
+    
+    # More aggressive busy-wait for better precision
+    while datetime.now() < target_click_time:
+        remaining = (target_click_time - datetime.now()).total_seconds()
+        if remaining > 0.01:  # Even smaller threshold for more precision
+            await asyncio.sleep(min(remaining * 0.15, 0.01))  # Even smaller chunks for better precision
         else:
-            # Very close, busy-wait for precision
-            while datetime.now() < click_time:
+            # Very close, busy-wait for maximum precision
+            while datetime.now() < target_click_time:
                 pass
     
     return True
 
 
-async def click_find_at_precise_time(page, target_time_str, click_before_seconds=1.0):
+async def click_find_at_precise_time(page, target_time_str, click_before_seconds=2.1):
     """
     Click the Find button at a precise time, just before shifts become available.
+    Default is 2.1 seconds to account for system delays - clicks when clock shows "59".
     
     Args:
         page: Playwright page object
         target_time_str: Time when shifts become available (e.g., "13:12" or "1:12:00")
-        click_before_seconds: How many seconds before target_time to click (default 1.0)
+        click_before_seconds: How many seconds before target_time to click (default 2.1)
     """
     target_time = parse_target_time(target_time_str)
     if not target_time:
         print(f"✗ Invalid time format: {target_time_str}. Use format like '13:12' or '1:12:00'")
         return False
     
-    # Wait until the precise moment
+    # Get button ready BEFORE waiting (eliminates delay when it's time to click)
+    find_btn = await page.query_selector('button.cx-button[type="submit"]')
+    if not find_btn:
+        print("✗ Could not find 'Find' button")
+        return False
+    
+    is_disabled = await find_btn.is_disabled()
+    if is_disabled:
+        print(f"⚠ Find button is disabled, waiting for cooldown...")
+        ready = await wait_for_find_button_ready(page, timeout=15000)
+        if not ready:
+            print("✗ Timeout waiting for button to be enabled")
+            return False
+    
+    # NOW wait until the precise moment (button is already ready)
     success = await wait_until_time(target_time, click_before_seconds)
     if not success:
         return False
     
-    # Click Find at the precise moment
-    print(f"🎯 Clicking 'Find' at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
-    find_btn = await page.query_selector('button.cx-button[type="submit"]')
-    if find_btn:
-        is_disabled = await find_btn.is_disabled()
-        if is_disabled:
-            print(f"⚠ Find button is disabled, waiting for cooldown...")
-            ready = await wait_for_find_button_ready(page, timeout=15000)
-            if not ready:
-                print("✗ Timeout waiting for button to be enabled")
-                return False
-        
-        await find_btn.click()
-        print(f"✓ Find clicked! Search active when shifts drop at {target_time.strftime('%H:%M:%S')}")
-        return True
-    else:
-        print("✗ Could not find 'Find' button")
-        return False
+    # Click Find at the precise moment (button is already ready)
+    actual_click_time = datetime.now()
+    print(f"🎯 Clicking 'Find' at {actual_click_time.strftime('%H:%M:%S.%f')[:-3]}")
+    await find_btn.click()
+    after_click_time = datetime.now()
+    click_duration = (after_click_time - actual_click_time).total_seconds() * 1000
+    print(f"✓ Find clicked! (took {click_duration:.1f}ms) Search active when shifts drop at {target_time.strftime('%H:%M:%S')}")
+    return True
 
 
-async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=1.0):
+async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=2.1):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
@@ -633,7 +763,7 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
 
         if target_time:
             # Precise timing mode: wait until target time, then click Find
-            print(f"🎯 PRECISE TIMING MODE")
+            print(f"🎯 PRECISE TIMING MODE (HOT-DROP OPTIMIZED)")
             print(f"   Target time (when shifts drop): {target_time}")
             print(f"   Will click 'Find' {click_before_seconds} seconds before")
             print(f"   Current time: {datetime.now().strftime('%H:%M:%S')}\n")
@@ -641,21 +771,17 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
             # Wait until the precise moment and click Find
             success = await click_find_at_precise_time(page, target_time, click_before_seconds)
             if success:
-                # Wait for shifts to appear (loading completes)
-                print("  → Waiting for shifts to appear...")
-                await page.wait_for_load_state("networkidle")
+                # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
+                # Don't wait for networkidle - start aggressive polling right away
+                print("\n📋 HOT-DROP MODE: Aggressively watching for shifts (no networkidle wait)...")
                 
-                # Wait for shift cards to appear
-                try:
-                    await page.wait_for_selector(".cx-list-item.pointer-cursor", timeout=5000)
-                    print("  ✓ Shifts appeared!")
-                except Exception as e:
-                    print(f"  ⚠ No shifts found yet: {e}")
+                # Use optimized booking function that polls aggressively
+                booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
                 
-                # Now attempt to book
-                print("\n📋 ATTEMPTING TO BOOK SHIFTS")
-                await try_book_shifts(page, dry_run=dry_run)
-                print(f"\n✓ Precise timing booking completed!")
+                if booking_success:
+                    print(f"\n✅ HOT-DROP BOOKING COMPLETED!")
+                else:
+                    print(f"\n⚠ No shifts found in hot-drop window")
             else:
                 print(f"\n✗ Precise timing search failed")
         else:
@@ -700,18 +826,32 @@ if __name__ == "__main__":
         if "--full" in sys.argv:
             # Full flow test (simulates complete automation)
             max_cycles = 5
+            target_time = None
+            click_before_seconds = 2.1
+            
             for arg in sys.argv:
                 if arg.startswith("--cycles="):
                     try:
                         max_cycles = int(arg.split("=")[1])
                     except ValueError:
                         pass
+                elif arg.startswith("--time="):
+                    target_time = arg.split("=")[1]
+                elif arg.startswith("--click-before="):
+                    try:
+                        click_before_seconds = float(arg.split("=")[1])
+                    except ValueError:
+                        pass
             
             print(f"Running FULL FLOW test (simulates complete automation)")
             print(f"  - Dry run: {dry_run}")
-            print(f"  - Max cycles: {max_cycles} (0 = infinite)")
+            if target_time:
+                print(f"  - Precise timing: {target_time} (click {click_before_seconds}s before)")
+            else:
+                print(f"  - Max cycles: {max_cycles} (0 = infinite)")
             print()
-            asyncio.run(test_full_flow_dummy(dry_run=dry_run, max_cycles=max_cycles))
+            asyncio.run(test_full_flow_dummy(dry_run=dry_run, max_cycles=max_cycles, 
+                                            target_time=target_time, click_before_seconds=click_before_seconds))
         else:
             # Simple test (just booking logic)
             cycles = 3
@@ -733,7 +873,7 @@ if __name__ == "__main__":
         dry_run = "--live" not in sys.argv
         days_ahead = 6
         target_time = None
-        click_before_seconds = 1.0
+        click_before_seconds = 2.1
         
         for arg in sys.argv[1:]:
             if arg.startswith("--days="):
