@@ -255,7 +255,7 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
-        
+
         print("\n" + "="*70)
         print("FULL AUTOMATION FLOW TEST (Using Dummy Pages)")
         print("="*70)
@@ -271,7 +271,7 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5):
         # Navigate to login page first thing
         await page.goto(dummy_login_url, wait_until="networkidle", timeout=30000)
         await page.wait_for_load_state("networkidle")
-        
+
         # Verify we're on the login page
         current_url = page.url
         print(f"  → Current URL: {current_url}")
@@ -336,12 +336,12 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5):
         # Track search time for cooldown
         last_search_time = time.monotonic()
         cycle_count = 0
-        
+
         # Step 6: Main loop - repeat search and booking
         print("\n" + "="*70)
         print("STEP 6: Main Loop - Continuous Search and Booking")
         print("="*70)
-        
+
         while True:
             cycle_count += 1
             if max_cycles > 0 and cycle_count > max_cycles:
@@ -515,36 +515,177 @@ async def test_dummy_page(dry_run=True, cycles=3):
         await browser.close()
 
 
-async def main_loop(dry_run=True, interval_sec=5, days_ahead=6):
+def parse_target_time(time_str):
+    """
+    Parse a time string like "13:12" or "1:12:00" into a datetime for today.
+    Returns None if parsing fails.
+    """
+    try:
+        # Try formats: "HH:MM" or "HH:MM:SS"
+        if len(time_str.split(':')) == 2:
+            hour, minute = map(int, time_str.split(':'))
+            target = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        elif len(time_str.split(':')) == 3:
+            hour, minute, second = map(int, time_str.split(':'))
+            target = datetime.now().replace(hour=hour, minute=minute, second=second, microsecond=0)
+        else:
+            return None
+        
+        # If time has passed today, assume it's for tomorrow
+        if target < datetime.now():
+            target += timedelta(days=1)
+        
+        return target
+    except Exception:
+        return None
+
+
+async def wait_until_time(target_time, click_before_seconds=1.0):
+    """
+    Wait until a specific time, then return the exact moment to click.
+    click_before_seconds: How many seconds before target_time to click (default 1 second)
+    """
+    now = datetime.now()
+    click_time = target_time - timedelta(seconds=click_before_seconds)
+    
+    if click_time < now:
+        print(f"⚠ Target time {target_time.strftime('%H:%M:%S')} has already passed")
+        return False
+    
+    wait_seconds = (click_time - now).total_seconds()
+    print(f"⏰ Waiting {wait_seconds:.2f} seconds until {click_time.strftime('%H:%M:%S')} (shifts drop at {target_time.strftime('%H:%M:%S')})")
+    
+    # Wait with high precision
+    await asyncio.sleep(wait_seconds)
+    
+    # Fine-tune to get as close as possible to the target
+    while datetime.now() < click_time:
+        remaining = (click_time - datetime.now()).total_seconds()
+        if remaining > 0.1:
+            await asyncio.sleep(remaining * 0.5)  # Sleep half the remaining time
+        else:
+            # Very close, busy-wait for precision
+            while datetime.now() < click_time:
+                pass
+    
+    return True
+
+
+async def click_find_at_precise_time(page, target_time_str, click_before_seconds=1.0):
+    """
+    Click the Find button at a precise time, just before shifts become available.
+    
+    Args:
+        page: Playwright page object
+        target_time_str: Time when shifts become available (e.g., "13:12" or "1:12:00")
+        click_before_seconds: How many seconds before target_time to click (default 1.0)
+    """
+    target_time = parse_target_time(target_time_str)
+    if not target_time:
+        print(f"✗ Invalid time format: {target_time_str}. Use format like '13:12' or '1:12:00'")
+        return False
+    
+    # Wait until the precise moment
+    success = await wait_until_time(target_time, click_before_seconds)
+    if not success:
+        return False
+    
+    # Click Find at the precise moment
+    print(f"🎯 Clicking 'Find' at {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+    find_btn = await page.query_selector('button.cx-button[type="submit"]')
+    if find_btn:
+        is_disabled = await find_btn.is_disabled()
+        if is_disabled:
+            print(f"⚠ Find button is disabled, waiting for cooldown...")
+            ready = await wait_for_find_button_ready(page, timeout=15000)
+            if not ready:
+                print("✗ Timeout waiting for button to be enabled")
+                return False
+        
+        await find_btn.click()
+        print(f"✓ Find clicked! Search active when shifts drop at {target_time.strftime('%H:%M:%S')}")
+        return True
+    else:
+        print("✗ Could not find 'Find' button")
+        return False
+
+
+async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=1.0):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
 
+        # Step 1: Setup - Login and navigate
+        print("🔧 SETUP PHASE")
+        print("  → Logging in...")
         await login(page)
+        print("  → Navigating to self-schedule page...")
         await page.goto(CELAYIX_SHIFTS_URL)
         await page.wait_for_load_state("networkidle")
+        print("  ✓ Setup complete\n")
 
-        # Set end date to next week and run initial search
-        await apply_end_date_and_find(page, days_ahead=days_ahead)
-        
-        await try_book_shifts(page, dry_run=dry_run)
-        last_search_time = time.monotonic()
+        # Step 2: Set end date (but don't click Find yet)
+        print("📅 SETTING END DATE")
+        end = get_next_week_end(days_ahead)
+        end_str = format_celayix_date_short(end)
+        await page.fill('#selfschedule-endDate', end_str)
+        print(f"  ✓ End date set to {end_str}\n")
 
-
-        while True:
-            # enforce at least 10 seconds between searches
-            now = time.monotonic()
-            elapsed = now - last_search_time
-            min_gap = 11.0  # Celayix requirement
-
-            if elapsed < min_gap:
-                await asyncio.sleep((min_gap - elapsed) + 0.3)  # small safety buffer
-
+        if target_time:
+            # Precise timing mode: wait until target time, then click Find
+            print(f"🎯 PRECISE TIMING MODE")
+            print(f"   Target time (when shifts drop): {target_time}")
+            print(f"   Will click 'Find' {click_before_seconds} seconds before")
+            print(f"   Current time: {datetime.now().strftime('%H:%M:%S')}\n")
+            
+            # Wait until the precise moment and click Find
+            success = await click_find_at_precise_time(page, target_time, click_before_seconds)
+            if success:
+                # Wait for shifts to appear (loading completes)
+                print("  → Waiting for shifts to appear...")
+                await page.wait_for_load_state("networkidle")
+                
+                # Wait for shift cards to appear
+                try:
+                    await page.wait_for_selector(".cx-list-item.pointer-cursor", timeout=5000)
+                    print("  ✓ Shifts appeared!")
+                except Exception as e:
+                    print(f"  ⚠ No shifts found yet: {e}")
+                
+                # Now attempt to book
+                print("\n📋 ATTEMPTING TO BOOK SHIFTS")
+                await try_book_shifts(page, dry_run=dry_run)
+                print(f"\n✓ Precise timing booking completed!")
+            else:
+                print(f"\n✗ Precise timing search failed")
+        else:
+            # Normal mode: continuous searching
+            print("🔄 CONTINUOUS MODE")
+            # Do initial search
             await page.click('button.cx-button[type="submit"]')
             await page.wait_for_load_state("networkidle")
+            await try_book_shifts(page, dry_run=dry_run)
             last_search_time = time.monotonic()
 
-            await try_book_shifts(page, dry_run=dry_run)
+            while True:
+                # enforce at least 10 seconds between searches
+                now = time.monotonic()
+                elapsed = now - last_search_time
+                min_gap = 11.0  # Celayix requirement
+
+                if elapsed < min_gap:
+                    await asyncio.sleep((min_gap - elapsed) + 0.3)  # small safety buffer
+
+                await page.click('button.cx-button[type="submit"]')
+                await page.wait_for_load_state("networkidle")
+                last_search_time = time.monotonic()
+
+                await try_book_shifts(page, dry_run=dry_run)
+        
+        # Keep browser open for a moment to see results (only in precise timing mode)
+        if target_time:
+            print("\n⏸ Browser will stay open for 10 seconds to view results...")
+            await asyncio.sleep(10)
 
 
 
@@ -588,5 +729,36 @@ if __name__ == "__main__":
             print()
             asyncio.run(test_dummy_page(dry_run=dry_run, cycles=cycles))
     else:
-        # Start in dry-run mode for testing.
-        asyncio.run(main_loop(dry_run=True, interval_sec=15))
+        # Parse command line arguments for main loop
+        dry_run = "--live" not in sys.argv
+        days_ahead = 6
+        target_time = None
+        click_before_seconds = 1.0
+        
+        for arg in sys.argv[1:]:
+            if arg.startswith("--days="):
+                try:
+                    days_ahead = int(arg.split("=")[1])
+                except ValueError:
+                    pass
+            elif arg.startswith("--time="):
+                target_time = arg.split("=")[1]
+            elif arg.startswith("--click-before="):
+                try:
+                    click_before_seconds = float(arg.split("=")[1])
+                except ValueError:
+                    pass
+        
+        if target_time:
+            print(f"🎯 PRECISE TIMING MODE")
+            print(f"   Target time: {target_time}")
+            print(f"   Click before: {click_before_seconds} seconds")
+            print(f"   Dry run: {dry_run}")
+            print()
+        else:
+            print(f"Running in continuous mode (dry_run={dry_run})")
+            print(f"💡 Use --time=HH:MM to enable precise timing mode")
+            print()
+        
+        asyncio.run(main_loop(dry_run=dry_run, interval_sec=15, days_ahead=days_ahead, 
+                              target_time=target_time, click_before_seconds=click_before_seconds))
