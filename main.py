@@ -7,6 +7,14 @@ from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 from datetime import date, timedelta
 import time
+import json
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+    print("⚠ aiohttp not installed. Install with: pip install aiohttp")
+    print("   Falling back to Playwright-only mode (slower for bot competition)")
 
 
 
@@ -64,6 +72,329 @@ async def login(page):
     await page.fill('input[name="password"]', PASSWORD)
     await page.click("button[type=submit]")
     await page.wait_for_load_state("networkidle")
+
+
+# ============================================================================
+# BOT COMPETITION OPTIMIZATIONS: Hybrid API Approach
+# ============================================================================
+
+class APIEndpointCapture:
+    """Captures API endpoints from network requests for direct HTTP calls (bot competition mode)"""
+    def __init__(self):
+        self.find_endpoint = None
+        self.find_method = None
+        self.find_headers = None
+        self.find_body = None
+        self.booking_endpoint = None
+        self.booking_method = None
+        self.booking_headers = None
+        self.booking_body = None
+        self.captured = False
+    
+    async def setup_interception(self, page):
+        """Set up network request interception to capture API endpoints"""
+        async def handle_request(request):
+            url = request.url
+            method = request.method
+            
+            # Capture "Find" API call (search for shifts)
+            if any(keyword in url.lower() for keyword in ['selfschedule', 'search', 'find', 'shift', 'schedule']):
+                if method in ['POST', 'GET', 'PUT']:
+                    # Only capture if we don't have one yet, or if this looks more relevant
+                    if not self.find_endpoint or 'selfschedule' in url.lower():
+                        self.find_endpoint = url
+                        self.find_method = method
+                        self.find_headers = dict(request.headers)
+                        try:
+                            self.find_body = await request.post_data()
+                        except:
+                            self.find_body = None
+                        print(f"🔍 Captured FIND endpoint: {method} {url[:80]}...")
+            
+            # Capture booking API call
+            if any(keyword in url.lower() for keyword in ['book', 'schedule', 'assign', 'claim']):
+                if method in ['POST', 'PUT']:
+                    self.booking_endpoint = url
+                    self.booking_method = method
+                    self.booking_headers = dict(request.headers)
+                    try:
+                        self.booking_body = await request.post_data()
+                    except:
+                        self.booking_body = None
+                    print(f"🔍 Captured BOOKING endpoint: {method} {url[:80]}...")
+        
+        page.on('request', handle_request)
+    
+    def is_ready(self):
+        """Check if we've captured the necessary endpoints"""
+        return self.find_endpoint is not None
+
+
+async def extract_cookies_from_page(page):
+    """Extract cookies from Playwright page for use in direct HTTP requests"""
+    cookies = await page.context.cookies()
+    cookie_dict = {}
+    for cookie in cookies:
+        cookie_dict[cookie['name']] = cookie['value']
+    return cookie_dict
+
+
+async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000):
+    """
+    BOT COMPETITION: Search for shifts using direct API call (5-20ms vs 50-200ms)
+    Returns shifts as JSON (much faster than DOM parsing)
+    """
+    if not api_capture.find_endpoint:
+        return None, "No find endpoint captured"
+    
+    try:
+        headers = dict(api_capture.find_headers) if api_capture.find_headers else {}
+        url = api_capture.find_endpoint
+        body = api_capture.find_body
+        
+        # Modify body/params with end date
+        if api_capture.find_method == 'GET':
+            separator = '&' if '?' in url else '?'
+            url = f"{url}{separator}endDate={end_date_str}"
+        else:
+            try:
+                body_json = json.loads(body) if isinstance(body, str) else (body or {})
+                if isinstance(body_json, dict):
+                    body_json['endDate'] = end_date_str
+                    body = json.dumps(body_json)
+            except:
+                pass
+        
+        start_time = time.monotonic()
+        async with session.request(
+            method=api_capture.find_method,
+            url=url,
+            headers=headers,
+            data=body,
+            timeout=aiohttp.ClientTimeout(total=timeout/1000)
+        ) as response:
+            duration = (time.monotonic() - start_time) * 1000
+            
+            if response.status == 200:
+                result_json = await response.json()
+                print(f"    → ✅ API search complete (took {duration:.1f}ms)")
+                return result_json, None
+            else:
+                result_text = await response.text()
+                return None, f"API returned {response.status}: {result_text[:100]}"
+    except asyncio.TimeoutError:
+        return None, "API request timeout"
+    except Exception as e:
+        return None, f"API error: {e}"
+
+
+async def book_via_api_single(session, api_capture, shift_id, offset_ms=0, dry_run=True):
+    """
+    BOT COMPETITION: Single booking attempt via direct API call
+    offset_ms: Small timing offset for parallel attempts
+    """
+    if not api_capture.booking_endpoint:
+        return False, "No booking endpoint captured"
+    
+    if offset_ms > 0:
+        await asyncio.sleep(offset_ms / 1000)
+    
+    if dry_run:
+        return True, "Dry run"
+    
+    try:
+        headers = dict(api_capture.booking_headers) if api_capture.booking_headers else {}
+        body = api_capture.booking_body
+        
+        # Modify body with shift_id
+        if body and shift_id:
+            try:
+                body_json = json.loads(body) if isinstance(body, str) else body
+                if isinstance(body_json, dict):
+                    # Try common field names
+                    for field in ['shiftId', 'id', '_id', 'shift_id', 'shiftID']:
+                        if field in body_json or not any(k in body_json for k in ['shiftId', 'id', '_id']):
+                            body_json[field] = shift_id
+                            break
+                    body = json.dumps(body_json)
+            except:
+                pass
+        
+        start_time = time.monotonic()
+        async with session.request(
+            method=api_capture.booking_method,
+            url=api_capture.booking_endpoint,
+            headers=headers,
+            data=body
+        ) as response:
+            duration = (time.monotonic() - start_time) * 1000
+            result = await response.text()
+            
+            if response.status in [200, 201]:
+                return True, f"Success ({duration:.1f}ms)"
+            else:
+                return False, f"Failed {response.status} ({duration:.1f}ms)"
+    except Exception as e:
+        return False, str(e)
+
+
+async def book_via_api_parallel(session, api_capture, shift_id, num_attempts=5, dry_run=True):
+    """
+    BOT COMPETITION: Parallel booking attempts for maximum success rate
+    Sends multiple requests simultaneously with slight timing offsets
+    """
+    if not api_capture.booking_endpoint:
+        return False, "No booking endpoint captured"
+    
+    if dry_run:
+        print(f"    → DRY-RUN: would send {num_attempts} parallel booking requests")
+        return True, "Dry run"
+    
+    # Create parallel tasks with slight offsets (0ms, 2ms, 4ms, 6ms, 8ms)
+    tasks = [
+        book_via_api_single(session, api_capture, shift_id, offset_ms=i*2, dry_run=False)
+        for i in range(num_attempts)
+    ]
+    
+    start_time = time.monotonic()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    total_duration = (time.monotonic() - start_time) * 1000
+    
+    # Check if any succeeded
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            continue
+        success, msg = result
+        if success:
+            print(f"    → ✅ BOOKED via API (attempt {i+1}, {total_duration:.1f}ms total)")
+            return True, msg
+    
+    print(f"    → ✗ All {num_attempts} parallel attempts failed ({total_duration:.1f}ms)")
+    return False, "All attempts failed"
+
+
+async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, timeout=5000, parallel_attempts=5, target_drop_time=None):
+    """
+    BOT COMPETITION: Fastest booking method using direct API calls
+    - Uses direct API calls (no DOM parsing) = 5-20ms
+    - Parallel booking attempts for maximum success rate
+    - Falls back to Playwright if API not available
+    - target_drop_time: If provided, waits until this time before searching (for precise timing)
+    """
+    if not AIOHTTP_AVAILABLE:
+        print("  → Falling back to Playwright (aiohttp not available)")
+        return await try_book_shifts_optimized(page, dry_run, timeout)
+    
+    if not api_capture.is_ready():
+        print("  → API endpoints not captured, falling back to Playwright")
+        return await try_book_shifts_optimized(page, dry_run, timeout)
+    
+    # If target_drop_time is provided, wait until shifts have actually dropped
+    if target_drop_time:
+        now = datetime.now()
+        if now < target_drop_time:
+            wait_seconds = (target_drop_time - now).total_seconds()
+            print(f"  ⏳ Waiting {wait_seconds:.2f}s until shifts drop at {target_drop_time.strftime('%H:%M:%S')}...")
+            await asyncio.sleep(wait_seconds)
+        elif (now - target_drop_time).total_seconds() < 1:
+            # Just dropped, wait a tiny bit for server to process
+            await asyncio.sleep(0.1)
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 🚀 BOT COMPETITION MODE: Direct API calls...")
+    
+    cookies = await extract_cookies_from_page(page)
+    
+    async with aiohttp.ClientSession(cookies=cookies) as session:
+        # Step 1: Search for shifts via API (ultra-fast)
+        start_time = time.monotonic()
+        shifts_data, error = await search_shifts_via_api(session, api_capture, end_date_str, timeout)
+        
+        if error:
+            print(f"    ⚠ API search failed: {error}")
+            print("    → Falling back to Playwright...")
+            return await try_book_shifts_optimized(page, dry_run, timeout)
+        
+        if not shifts_data:
+            elapsed = (time.monotonic() - start_time) * 1000
+            print(f"    ⏱ No shifts found via API after {elapsed:.0f}ms")
+            return False
+        
+        # Step 2: Parse shifts from JSON (instant, no DOM parsing)
+        shifts = []
+        if isinstance(shifts_data, list):
+            shifts = shifts_data
+        elif isinstance(shifts_data, dict):
+            shifts = shifts_data.get('shifts', shifts_data.get('data', shifts_data.get('items', [])))
+        
+        if not shifts:
+            print(f"    ⚠ No shifts in API response")
+            return False
+        
+        # Step 3: Get first shift ID
+        first_shift = shifts[0]
+        shift_id = None
+        if isinstance(first_shift, dict):
+            shift_id = first_shift.get('id', first_shift.get('shiftId', first_shift.get('_id', first_shift.get('shift_id'))))
+        
+        if not shift_id:
+            print(f"    ⚠ Could not extract shift ID from API response")
+            print(f"    → Response keys: {list(first_shift.keys()) if isinstance(first_shift, dict) else 'not a dict'}")
+            return await try_book_shifts_optimized(page, dry_run, timeout)
+        
+        # Step 4: Book via API with parallel attempts (maximum speed + success rate)
+        elapsed = (time.monotonic() - start_time) * 1000
+        print(f"    ⚡ Shift found via API in {elapsed:.1f}ms: ID={shift_id}")
+        
+        booking_success, booking_result = await book_via_api_parallel(
+            session, api_capture, shift_id, num_attempts=parallel_attempts, dry_run=dry_run
+        )
+        
+        if booking_success:
+            total_duration = (time.monotonic() - start_time) * 1000
+            print(f"    ✅ TOTAL BOT-COMPETITION TIME: {total_duration:.1f}ms (API + Parallel)")
+            return True
+        else:
+            print(f"    ⚠ API booking failed, falling back to Playwright...")
+            return await try_book_shifts_optimized(page, dry_run, timeout)
+
+
+async def capture_api_endpoints(page, api_capture):
+    """
+    Capture API endpoints by doing a test Find click and intercepting network requests.
+    This allows us to use direct API calls for bot competition.
+    """
+    print("🔍 BOT COMPETITION: Capturing API endpoints...")
+    
+    await api_capture.setup_interception(page)
+    
+    find_btn = await page.query_selector('button.cx-button[type="submit"]')
+    if not find_btn:
+        print("  ✗ Could not find 'Find' button for endpoint capture")
+        return False
+    
+    is_disabled = await find_btn.is_disabled()
+    if is_disabled:
+        print("  ⏳ Waiting for Find button cooldown before capturing endpoints...")
+        ready = await wait_for_find_button_ready(page, timeout=15000)
+        if not ready:
+            print("  ✗ Timeout waiting for button")
+            return False
+    
+    print("  → Performing test Find click to capture API endpoint...")
+    await find_btn.click()
+    
+    # Wait for requests to be captured
+    await asyncio.sleep(2)
+    
+    if api_capture.is_ready():
+        print(f"  ✅ Captured FIND endpoint: {api_capture.find_method} {api_capture.find_endpoint[:60]}...")
+        if api_capture.booking_endpoint:
+            print(f"  ✅ Captured BOOKING endpoint: {api_capture.booking_method} {api_capture.booking_endpoint[:60]}...")
+        return True
+    else:
+        print("  ⚠ Could not capture API endpoints (may not be available)")
+        print("  → Will fall back to Playwright-only mode (slower)")
+        return False
 
 
 async def try_book_shifts_optimized(page, dry_run=True, timeout=5000):
@@ -129,8 +460,8 @@ async def try_book_shifts_optimized(page, dry_run=True, timeout=5000):
                     print(f"    ✗ Could not find 'Schedule me' button")
                     return False
         
-        # No shifts yet - wait 10ms and check again (aggressive polling)
-        await asyncio.sleep(0.01)
+        # No shifts yet - wait 1-2ms and check again (ultra-aggressive polling for bot competition)
+        await asyncio.sleep(0.001)  # 1ms polling for maximum speed
     
     # Timeout - no shifts found
     elapsed = (time.monotonic() - start_time) * 1000
@@ -392,24 +723,50 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5, target_time=None, cli
         print(f"  ✓ End date set to {end_str}\n")
 
         if target_time:
+            # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
+            api_capture = APIEndpointCapture()
+            hybrid_mode_available = False
+            
+            if AIOHTTP_AVAILABLE:
+                print("🔬 BOT COMPETITION: Attempting to capture API endpoints...")
+                hybrid_mode_available = await capture_api_endpoints(page, api_capture)
+                if hybrid_mode_available:
+                    print("  ✅ Bot competition mode enabled - using direct API calls (5-20ms)")
+                    print("  ✅ Parallel booking attempts for maximum success rate\n")
+                else:
+                    print("  ⚠ Bot competition mode unavailable - using Playwright-only (50-200ms)\n")
+            else:
+                print("  ⚠ aiohttp not installed - using Playwright-only mode (slower)\n")
+                print("  💡 Install with: pip install aiohttp for bot competition mode\n")
+            
             # Precise timing mode: wait until target time, then click Find
-            print(f"🎯 PRECISE TIMING MODE (HOT-DROP OPTIMIZED)")
+            print(f"🎯 PRECISE TIMING MODE (BOT COMPETITION OPTIMIZED)")
             print(f"   Target time (when shifts drop): {target_time}")
             print(f"   Will click 'Find' {click_before_seconds} seconds before")
             print(f"   Current time: {datetime.now().strftime('%H:%M:%S')}\n")
             
-            # Wait until the precise moment and click Find
-            success = await click_find_at_precise_time(page, target_time, click_before_seconds)
+            # Wait until the precise moment and click Find (or call API directly)
+            success = await click_find_at_precise_time(
+                page, target_time, click_before_seconds, 
+                use_api=hybrid_mode_available, api_capture=api_capture, end_date_str=end_str
+            )
             if success:
-                # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
-                # Don't wait for networkidle - start aggressive polling right away
-                print("\n📋 HOT-DROP MODE: Aggressively watching for shifts (no networkidle wait)...")
-                
-                # Use optimized booking function that polls aggressively
-                booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
+                # BOT COMPETITION: Use direct API calls if available, else fall back to Playwright
+                if hybrid_mode_available:
+                    print("\n📋 BOT COMPETITION MODE: Using direct API calls + parallel attempts...")
+                    # Parse target_time to datetime for waiting
+                    target_drop_datetime = parse_target_time(target_time)
+                    booking_success = await try_book_shifts_hybrid(
+                        page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
+                        parallel_attempts=5, target_drop_time=target_drop_datetime
+                    )
+                else:
+                    # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
+                    print("\n📋 HOT-DROP MODE: Aggressively watching for shifts (no networkidle wait)...")
+                    booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
                 
                 if booking_success:
-                    print(f"\n✅ HOT-DROP BOOKING COMPLETED!")
+                    print(f"\n✅ BOT COMPETITION BOOKING COMPLETED!")
                 else:
                     print(f"\n⚠ No shifts found in hot-drop window")
                 
@@ -696,22 +1053,39 @@ async def wait_until_time(target_time, click_before_seconds=1.0):
     return True
 
 
-async def click_find_at_precise_time(page, target_time_str, click_before_seconds=2.1):
+async def click_find_at_precise_time(page, target_time_str, click_before_seconds=2.1, use_api=False, api_capture=None, end_date_str=None):
     """
     Click the Find button at a precise time, just before shifts become available.
-    Default is 2.1 seconds to account for system delays - clicks when clock shows "59".
+    BOT COMPETITION: Supports direct API calls for maximum speed.
     
     Args:
         page: Playwright page object
         target_time_str: Time when shifts become available (e.g., "13:12" or "1:12:00")
         click_before_seconds: How many seconds before target_time to click (default 2.1)
+        use_api: If True and api_capture is ready, use direct API call instead of clicking
+        api_capture: APIEndpointCapture instance for hybrid mode
+        end_date_str: End date string for API calls
     """
     target_time = parse_target_time(target_time_str)
     if not target_time:
         print(f"✗ Invalid time format: {target_time_str}. Use format like '13:12' or '1:12:00'")
         return False
     
-    # Get button ready BEFORE waiting (eliminates delay when it's time to click)
+    # BOT COMPETITION: In API mode, we don't need to "click" - just return success
+    # The actual search will happen in try_book_shifts_hybrid after shifts drop
+    if use_api and api_capture and api_capture.is_ready() and AIOHTTP_AVAILABLE:
+        # Just wait until the precise time (no API call needed here)
+        # The search will happen in try_book_shifts_hybrid after shifts drop
+        success = await wait_until_time(target_time, click_before_seconds)
+        if not success:
+            return False
+        
+        actual_time = datetime.now()
+        print(f"🎯 Ready for bot competition mode at {actual_time.strftime('%H:%M:%S.%f')[:-3]}")
+        print(f"✓ Will search via API after shifts drop at {target_time.strftime('%H:%M:%S')}")
+        return True
+    
+    # FALLBACK: Use Playwright click
     find_btn = await page.query_selector('button.cx-button[type="submit"]')
     if not find_btn:
         print("✗ Could not find 'Find' button")
@@ -725,12 +1099,10 @@ async def click_find_at_precise_time(page, target_time_str, click_before_seconds
             print("✗ Timeout waiting for button to be enabled")
             return False
     
-    # NOW wait until the precise moment (button is already ready)
     success = await wait_until_time(target_time, click_before_seconds)
     if not success:
         return False
     
-    # Click Find at the precise moment (button is already ready)
     actual_click_time = datetime.now()
     print(f"🎯 Clicking 'Find' at {actual_click_time.strftime('%H:%M:%S.%f')[:-3]}")
     await find_btn.click()
@@ -762,24 +1134,50 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
         print(f"  ✓ End date set to {end_str}\n")
 
         if target_time:
+            # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
+            api_capture = APIEndpointCapture()
+            hybrid_mode_available = False
+            
+            if AIOHTTP_AVAILABLE:
+                print("🔬 BOT COMPETITION: Attempting to capture API endpoints...")
+                hybrid_mode_available = await capture_api_endpoints(page, api_capture)
+                if hybrid_mode_available:
+                    print("  ✅ Bot competition mode enabled - using direct API calls (5-20ms)")
+                    print("  ✅ Parallel booking attempts for maximum success rate\n")
+                else:
+                    print("  ⚠ Bot competition mode unavailable - using Playwright-only (50-200ms)\n")
+            else:
+                print("  ⚠ aiohttp not installed - using Playwright-only mode (slower)\n")
+                print("  💡 Install with: pip install aiohttp for bot competition mode\n")
+            
             # Precise timing mode: wait until target time, then click Find
-            print(f"🎯 PRECISE TIMING MODE (HOT-DROP OPTIMIZED)")
+            print(f"🎯 PRECISE TIMING MODE (BOT COMPETITION OPTIMIZED)")
             print(f"   Target time (when shifts drop): {target_time}")
             print(f"   Will click 'Find' {click_before_seconds} seconds before")
             print(f"   Current time: {datetime.now().strftime('%H:%M:%S')}\n")
             
-            # Wait until the precise moment and click Find
-            success = await click_find_at_precise_time(page, target_time, click_before_seconds)
+            # Wait until the precise moment and click Find (or call API directly)
+            success = await click_find_at_precise_time(
+                page, target_time, click_before_seconds, 
+                use_api=hybrid_mode_available, api_capture=api_capture, end_date_str=end_str
+            )
             if success:
-                # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
-                # Don't wait for networkidle - start aggressive polling right away
-                print("\n📋 HOT-DROP MODE: Aggressively watching for shifts (no networkidle wait)...")
-                
-                # Use optimized booking function that polls aggressively
-                booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
+                # BOT COMPETITION: Use direct API calls if available, else fall back to Playwright
+                if hybrid_mode_available:
+                    print("\n📋 BOT COMPETITION MODE: Using direct API calls + parallel attempts...")
+                    # Parse target_time to datetime for waiting
+                    target_drop_datetime = parse_target_time(target_time)
+                    booking_success = await try_book_shifts_hybrid(
+                        page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
+                        parallel_attempts=5, target_drop_time=target_drop_datetime
+                    )
+                else:
+                    # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
+                    print("\n📋 HOT-DROP MODE: Aggressively watching for shifts (no networkidle wait)...")
+                    booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
                 
                 if booking_success:
-                    print(f"\n✅ HOT-DROP BOOKING COMPLETED!")
+                    print(f"\n✅ BOT COMPETITION BOOKING COMPLETED!")
                 else:
                     print(f"\n⚠ No shifts found in hot-drop window")
             else:
