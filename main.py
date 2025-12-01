@@ -1286,7 +1286,7 @@ if __name__ == "__main__":
                     click_before_seconds = float(arg.split("=")[1])
                 except ValueError:
                     pass
-        
+        # Display mode info
         if target_time:
             print(f"🎯 PRECISE TIMING MODE")
             print(f"   Target time: {target_time}")
