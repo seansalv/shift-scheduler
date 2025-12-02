@@ -109,7 +109,25 @@ class APIEndpointCapture:
                             self.find_body = await request.post_data()
                         except:
                             self.find_body = None
-                        print(f"🔍 Captured FIND endpoint: {method} {url[:80]}...")
+                        print(f"\n{'='*80}")
+                        print(f"🔍 Captured FIND endpoint:")
+                        print(f"   Method: {method}")
+                        print(f"   Full URL: {url}")
+                        print(f"   Headers:")
+                        for key, value in self.find_headers.items():
+                            # Truncate sensitive values but show structure
+                            if key.lower() in ['cookie', 'authorization', 'x-csrf-token']:
+                                print(f"      {key}: {value[:50]}..." if len(str(value)) > 50 else f"      {key}: {value}")
+                            else:
+                                print(f"      {key}: {value}")
+                        if self.find_body:
+                            body_preview = self.find_body[:500] if len(self.find_body) > 500 else self.find_body
+                            print(f"   Request Body ({len(self.find_body)} chars): {body_preview}")
+                            if len(self.find_body) > 500:
+                                print(f"      ... (truncated, {len(self.find_body) - 500} more chars)")
+                        else:
+                            print(f"   Request Body: None (GET request or empty)")
+                        print(f"{'='*80}\n")
             
             # Capture booking API call
             if any(keyword in url.lower() for keyword in ['book', 'schedule', 'assign', 'claim']):
@@ -121,7 +139,25 @@ class APIEndpointCapture:
                         self.booking_body = await request.post_data()
                     except:
                         self.booking_body = None
-                    print(f"🔍 Captured BOOKING endpoint: {method} {url[:80]}...")
+                    print(f"\n{'='*80}")
+                    print(f"🔍 Captured BOOKING endpoint:")
+                    print(f"   Method: {method}")
+                    print(f"   Full URL: {url}")
+                    print(f"   Headers:")
+                    for key, value in self.booking_headers.items():
+                        # Truncate sensitive values but show structure
+                        if key.lower() in ['cookie', 'authorization', 'x-csrf-token']:
+                            print(f"      {key}: {value[:50]}..." if len(str(value)) > 50 else f"      {key}: {value}")
+                        else:
+                            print(f"      {key}: {value}")
+                    if self.booking_body:
+                        body_preview = self.booking_body[:500] if len(self.booking_body) > 500 else self.booking_body
+                        print(f"   Request Body ({len(self.booking_body)} chars): {body_preview}")
+                        if len(self.booking_body) > 500:
+                            print(f"      ... (truncated, {len(self.booking_body) - 500} more chars)")
+                    else:
+                        print(f"   Request Body: None")
+                    print(f"{'='*80}\n")
         
         page.on('request', handle_request)
     
@@ -165,6 +201,11 @@ async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000
             except:
                 pass
         
+        print(f"\n📡 Sending FIND API request:")
+        print(f"   Method: {api_capture.find_method}")
+        print(f"   URL: {url}")
+        print(f"   Modified Body: {body[:200] if body else 'None'}...")
+        
         start_time = time.monotonic()
         async with session.request(
             method=api_capture.find_method,
@@ -175,12 +216,17 @@ async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000
         ) as response:
             duration = (time.monotonic() - start_time) * 1000
             
+            print(f"   Response Status: {response.status}")
+            print(f"   Response Time: {duration:.1f}ms")
+            
             if response.status == 200:
                 result_json = await response.json()
-                print(f"    → ✅ API search complete (took {duration:.1f}ms)")
+                print(f"   Response Body (first 300 chars): {str(result_json)[:300]}...")
+                print(f"   → ✅ API search complete (took {duration:.1f}ms)")
                 return result_json, None
             else:
                 result_text = await response.text()
+                print(f"   Error Response: {result_text[:200]}...")
                 return None, f"API returned {response.status}: {result_text[:100]}"
     except asyncio.TimeoutError:
         return None, "API request timeout"
@@ -220,6 +266,9 @@ async def book_via_api_single(session, api_capture, shift_id, offset_ms=0, dry_r
             except:
                 pass
         
+        print(f"   📤 Booking Request #{offset_ms//2 + 1}: {api_capture.booking_method} {api_capture.booking_endpoint}")
+        print(f"      Body: {body[:200] if body else 'None'}...")
+        
         start_time = time.monotonic()
         async with session.request(
             method=api_capture.booking_method,
@@ -229,6 +278,8 @@ async def book_via_api_single(session, api_capture, shift_id, offset_ms=0, dry_r
         ) as response:
             duration = (time.monotonic() - start_time) * 1000
             result = await response.text()
+            
+            print(f"      Response: {response.status} ({duration:.1f}ms) - {result[:100]}...")
             
             if response.status in [200, 201]:
                 return True, f"Success ({duration:.1f}ms)"
@@ -249,6 +300,8 @@ async def book_via_api_parallel(session, api_capture, shift_id, num_attempts=5, 
     if dry_run:
         print(f"    → DRY-RUN: would send {num_attempts} parallel booking requests")
         return True, "Dry run"
+    
+    print(f"\n🚀 Sending {num_attempts} parallel booking requests for shift_id={shift_id}")
     
     # Create parallel tasks with slight offsets (0ms, 2ms, 4ms, 6ms, 8ms)
     tasks = [
@@ -300,9 +353,15 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
             # Just dropped, wait a tiny bit for server to process
             await asyncio.sleep(0.1)
     
+    print(f"\n{'='*80}")
     print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 🚀 BOT COMPETITION MODE: Direct API calls...")
+    print(f"   End Date: {end_date_str}")
+    print(f"   Target Drop Time: {target_drop_time.strftime('%H:%M:%S') if target_drop_time else 'N/A'}")
+    print(f"   Parallel Attempts: {parallel_attempts}")
+    print(f"{'='*80}")
     
     cookies = await extract_cookies_from_page(page)
+    print(f"   Extracted {len(cookies)} cookies from session")
     
     async with aiohttp.ClientSession(cookies=cookies) as session:
         # Step 1: Search for shifts via API (ultra-fast)
@@ -326,6 +385,10 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
         elif isinstance(shifts_data, dict):
             shifts = shifts_data.get('shifts', shifts_data.get('data', shifts_data.get('items', [])))
         
+        print(f"   Found {len(shifts)} shift(s) in API response")
+        if shifts:
+            print(f"   First shift data: {str(shifts[0])[:200]}...")
+        
         if not shifts:
             print(f"    ⚠ No shifts in API response")
             return False
@@ -335,10 +398,13 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
         shift_id = None
         if isinstance(first_shift, dict):
             shift_id = first_shift.get('id', first_shift.get('shiftId', first_shift.get('_id', first_shift.get('shift_id'))))
+            print(f"   Extracted shift_id: {shift_id}")
+            print(f"   Full shift keys: {list(first_shift.keys())}")
         
         if not shift_id:
             print(f"    ⚠ Could not extract shift ID from API response")
             print(f"    → Response keys: {list(first_shift.keys()) if isinstance(first_shift, dict) else 'not a dict'}")
+            print(f"    Full first shift object: {first_shift}")
             return await try_book_shifts_optimized(page, dry_run, timeout)
         
         # Step 4: Book via API with parallel attempts (maximum speed + success rate)
@@ -387,9 +453,14 @@ async def capture_api_endpoints(page, api_capture):
     await asyncio.sleep(2)
     
     if api_capture.is_ready():
-        print(f"  ✅ Captured FIND endpoint: {api_capture.find_method} {api_capture.find_endpoint[:60]}...")
+        print(f"\n{'='*80}")
+        print(f"✅ API ENDPOINT CAPTURE SUMMARY:")
+        print(f"   FIND Endpoint: {api_capture.find_method} {api_capture.find_endpoint}")
         if api_capture.booking_endpoint:
-            print(f"  ✅ Captured BOOKING endpoint: {api_capture.booking_method} {api_capture.booking_endpoint[:60]}...")
+            print(f"   BOOKING Endpoint: {api_capture.booking_method} {api_capture.booking_endpoint}")
+        else:
+            print(f"   ⚠ BOOKING Endpoint: Not captured yet (will be captured when you click 'Schedule me')")
+        print(f"{'='*80}\n")
         return True
     else:
         print("  ⚠ Could not capture API endpoints (may not be available)")
