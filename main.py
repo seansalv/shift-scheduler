@@ -116,6 +116,8 @@ async def login(page):
 
 class APIEndpointCapture:
     """Captures API endpoints from network requests for direct HTTP calls (bot competition mode)"""
+    ENDPOINTS_FILE = "captured_endpoints.json"  # File to store captured endpoints
+    
     def __init__(self):
         self.find_endpoint = None
         self.find_method = None
@@ -126,6 +128,57 @@ class APIEndpointCapture:
         self.booking_headers = None
         self.booking_body = None
         self.captured = False
+        
+        # Try to load previously captured endpoints
+        self.load_endpoints()
+    
+    def save_endpoints(self):
+        """Save captured endpoints to JSON file"""
+        try:
+            endpoints_data = {
+                'find_endpoint': self.find_endpoint,
+                'find_method': self.find_method,
+                'find_headers': self.find_headers,
+                'find_body': self.find_body,
+                'booking_endpoint': self.booking_endpoint,
+                'booking_method': self.booking_method,
+                'booking_headers': self.booking_headers,
+                'booking_body': self.booking_body,
+                'last_updated': datetime.now().isoformat()
+            }
+            
+            with open(self.ENDPOINTS_FILE, 'w') as f:
+                json.dump(endpoints_data, f, indent=2)
+            
+            print(f"💾 Saved endpoints to {self.ENDPOINTS_FILE}")
+        except Exception as e:
+            print(f"⚠️ Failed to save endpoints: {e}")
+    
+    def load_endpoints(self):
+        """Load previously captured endpoints from JSON file"""
+        try:
+            if os.path.exists(self.ENDPOINTS_FILE):
+                with open(self.ENDPOINTS_FILE, 'r') as f:
+                    endpoints_data = json.load(f)
+                
+                self.find_endpoint = endpoints_data.get('find_endpoint')
+                self.find_method = endpoints_data.get('find_method')
+                self.find_headers = endpoints_data.get('find_headers')
+                self.find_body = endpoints_data.get('find_body')
+                self.booking_endpoint = endpoints_data.get('booking_endpoint')
+                self.booking_method = endpoints_data.get('booking_method')
+                self.booking_headers = endpoints_data.get('booking_headers')
+                self.booking_body = endpoints_data.get('booking_body')
+                
+                last_updated = endpoints_data.get('last_updated', 'Unknown')
+                print(f"📂 Loaded previously captured endpoints from {self.ENDPOINTS_FILE} (last updated: {last_updated})")
+                
+                if self.find_endpoint:
+                    print(f"   ✅ FIND endpoint: {self.find_endpoint}")
+                if self.booking_endpoint:
+                    print(f"   ✅ BOOKING endpoint: {self.booking_endpoint}")
+        except Exception as e:
+            print(f"⚠️ Failed to load endpoints: {e}")
     
     async def setup_interception(self, page):
         """Set up network request interception to capture API endpoints"""
@@ -134,67 +187,72 @@ class APIEndpointCapture:
             method = request.method
             
             # Capture "Find" API call (search for shifts)
+            # EXCLUDE UpdateSelfSchedules - that's the booking endpoint, not search!
             if any(keyword in url.lower() for keyword in ['selfschedule', 'search', 'find', 'shift', 'schedule']):
-                if method in ['POST', 'GET', 'PUT']:
-                    # Only capture if we don't have one yet, or if this looks more relevant
-                    if not self.find_endpoint or 'selfschedule' in url.lower():
-                        self.find_endpoint = url
-                        self.find_method = method
-                        self.find_headers = dict(request.headers)
-                        
-                        # Try multiple methods to capture request body
-                        body = None
-                        try:
-                            body = await request.post_data()
-                        except:
-                            pass
-                        
-                        # If post_data() didn't work, try getting it from the request body buffer
-                        if not body:
+                if 'updateselfschedules' not in url.lower():  # Don't capture booking endpoint as FIND
+                    if method in ['POST', 'GET', 'PUT']:
+                        # Only capture if we don't have one yet, or if this looks more relevant
+                        if not self.find_endpoint or 'selfschedule' in url.lower():
+                            self.find_endpoint = url
+                            self.find_method = method
+                            self.find_headers = dict(request.headers)
+                            
+                            # Try multiple methods to capture request body
+                            body = None
                             try:
-                                post_data_buffer = request.post_data_buffer
-                                if post_data_buffer:
-                                    body = post_data_buffer.decode('utf-8')
+                                body = await request.post_data()
                             except:
                                 pass
-                        
-                        # If still no body, try to get it from the request
-                        if not body and method == 'POST':
-                            try:
-                                # Intercept the route to capture the body
-                                pass  # Will handle in route interception
-                            except:
-                                pass
-                        
-                        self.find_body = body
-                        print(f"\n{'='*80}")
-                        print(f"🔍 Captured FIND endpoint:")
-                        print(f"   Method: {method}")
-                        print(f"   Full URL: {url}")
-                        print(f"   Headers:")
-                        for key, value in self.find_headers.items():
-                            # Truncate sensitive values but show structure
-                            if key.lower() in ['cookie', 'authorization', 'x-csrf-token']:
-                                print(f"      {key}: {value[:50]}..." if len(str(value)) > 50 else f"      {key}: {value}")
+                            
+                            # If post_data() didn't work, try getting it from the request body buffer
+                            if not body:
+                                try:
+                                    post_data_buffer = request.post_data_buffer
+                                    if post_data_buffer:
+                                        body = post_data_buffer.decode('utf-8')
+                                except:
+                                    pass
+                            
+                            # If still no body, try to get it from the request
+                            if not body and method == 'POST':
+                                try:
+                                    # Intercept the route to capture the body
+                                    pass  # Will handle in route interception
+                                except:
+                                    pass
+                            
+                            self.find_body = body
+                            print(f"\n{'='*80}")
+                            print(f"🔍 Captured FIND endpoint:")
+                            print(f"   Method: {method}")
+                            print(f"   Full URL: {url}")
+                            print(f"   Headers:")
+                            for key, value in self.find_headers.items():
+                                # Truncate sensitive values but show structure
+                                if key.lower() in ['cookie', 'authorization', 'x-csrf-token']:
+                                    print(f"      {key}: {value[:50]}..." if len(str(value)) > 50 else f"      {key}: {value}")
+                                else:
+                                    print(f"      {key}: {value}")
+                            if self.find_body:
+                                body_preview = self.find_body[:500] if len(self.find_body) > 500 else self.find_body
+                                print(f"   Request Body ({len(self.find_body)} chars): {body_preview}")
+                                if len(self.find_body) > 500:
+                                    print(f"      ... (truncated, {len(self.find_body) - 500} more chars)")
                             else:
-                                print(f"      {key}: {value}")
-                        if self.find_body:
-                            body_preview = self.find_body[:500] if len(self.find_body) > 500 else self.find_body
-                            print(f"   Request Body ({len(self.find_body)} chars): {body_preview}")
-                            if len(self.find_body) > 500:
-                                print(f"      ... (truncated, {len(self.find_body) - 500} more chars)")
-                        else:
-                            print(f"   Request Body: None - will construct from dates")
-                        print(f"{'='*80}\n")
+                                print(f"   Request Body: None - will construct from dates")
+                            print(f"{'='*80}\n")
+                            # Save endpoints after capturing FIND endpoint
+                            self.save_endpoints()
             
             # Capture booking API call
-            if any(keyword in url.lower() for keyword in ['book', 'schedule', 'assign', 'claim']):
+            # Exclude GetSelfSchedules (that's the search endpoint, not booking)
+            if 'getselfschedules' not in url.lower():
+                # Check URL for booking keywords (including 'update' for UpdateSelfSchedules)
+                url_has_booking_keyword = any(keyword in url.lower() for keyword in ['book', 'assign', 'claim', 'update'])
+                
+                # Also check if method is POST/PUT (booking operations)
                 if method in ['POST', 'PUT']:
-                    self.booking_endpoint = url
-                    self.booking_method = method
-                    self.booking_headers = dict(request.headers)
-                    
-                    # Try multiple methods to capture request body
+                    # Try to get the body to check the service name FIRST (more reliable)
                     body = None
                     try:
                         body = await request.post_data()
@@ -209,43 +267,182 @@ class APIEndpointCapture:
                         except:
                             pass
                     
-                    self.booking_body = body
-                    print(f"\n{'='*80}")
-                    print(f"🔍 Captured BOOKING endpoint:")
-                    print(f"   Method: {method}")
-                    print(f"   Full URL: {url}")
-                    print(f"   Headers:")
-                    for key, value in self.booking_headers.items():
-                        # Truncate sensitive values but show structure
-                        if key.lower() in ['cookie', 'authorization', 'x-csrf-token']:
-                            print(f"      {key}: {value[:50]}..." if len(str(value)) > 50 else f"      {key}: {value}")
+                    # Check if this is actually a booking service by examining the service name FIRST
+                    is_booking_service = False
+                    service_name = None
+                    if body:
+                        try:
+                            body_json = json.loads(body) if isinstance(body, str) else body
+                            service_name = body_json.get('pcServiceName', '').lower()
+                            # UpdateSelfSchedules is a booking service!
+                            if service_name in ['updateselfschedules', 'assignselfschedule', 'bookselfschedule']:
+                                is_booking_service = True
+                            # Booking services typically have names like AssignSelfSchedule, BookSelfSchedule, etc.
+                            # But NOT GetSelfSchedules (which is search)
+                            elif service_name and 'getselfschedules' not in service_name:
+                                if any(keyword in service_name for keyword in ['assign', 'book', 'claim', 'take', 'update']):
+                                    is_booking_service = True
+                        except:
+                            pass
+                    
+                    # Also check URL for UpdateSelfSchedules (even if service name check failed)
+                    if not is_booking_service and 'updateselfschedules' in url.lower():
+                        is_booking_service = True
+                    
+                    # Only capture if:
+                    # 1. URL has booking keywords (book, assign, claim, update), OR
+                    # 2. Service name indicates it's a booking service
+                    if url_has_booking_keyword or is_booking_service:
+                        self.booking_endpoint = url
+                        self.booking_method = method
+                        self.booking_headers = dict(request.headers)
+                        self.booking_body = body
+                        print(f"\n{'='*80}")
+                        print(f"🔍 Captured BOOKING endpoint:")
+                        print(f"   Method: {method}")
+                        print(f"   Full URL: {url}")
+                        if body:
+                            try:
+                                body_json = json.loads(body) if isinstance(body, str) else body
+                                service_name = body_json.get('pcServiceName', 'N/A')
+                                print(f"   Service Name: {service_name}")
+                            except:
+                                pass
+                        print(f"   Headers:")
+                        for key, value in self.booking_headers.items():
+                            # Truncate sensitive values but show structure
+                            if key.lower() in ['cookie', 'authorization', 'x-csrf-token']:
+                                print(f"      {key}: {value[:50]}..." if len(str(value)) > 50 else f"      {key}: {value}")
+                            else:
+                                print(f"      {key}: {value}")
+                        if self.booking_body:
+                            print(f"   Request Body ({len(self.booking_body)} chars):")
+                            # Print FULL body, not truncated
+                            print(self.booking_body)
+                            
+                            # Also parse and show the structure, especially pcIODataSetString
+                            try:
+                                body_json = json.loads(self.booking_body) if isinstance(self.booking_body, str) else self.booking_body
+                                if isinstance(body_json, dict):
+                                    print(f"\n   📋 Parsed Request Structure:")
+                                    print(f"      Top-level keys: {list(body_json.keys())}")
+                                    
+                                    # Specifically check pcIODataSetString
+                                    if 'pcIODataSetString' in body_json:
+                                        io_data_str = body_json['pcIODataSetString']
+                                        if io_data_str and io_data_str.strip():
+                                            print(f"\n   🎯 pcIODataSetString Structure (THIS IS WHAT WE NEED!):")
+                                            try:
+                                                io_data = json.loads(io_data_str) if isinstance(io_data_str, str) else io_data_str
+                                                print(json.dumps(io_data, indent=6))
+                                                
+                                                # Show what's inside ttShiftGroup
+                                                if isinstance(io_data, dict):
+                                                    ds_shift_groups = io_data.get('dsShiftGroups', {})
+                                                    if isinstance(ds_shift_groups, dict):
+                                                        tt_shift_group = ds_shift_groups.get('ttShiftGroup', [])
+                                                        if isinstance(tt_shift_group, list) and len(tt_shift_group) > 0:
+                                                            print(f"\n   📦 Shift Object Fields in ttShiftGroup[0]:")
+                                                            shift_obj = tt_shift_group[0]
+                                                            if isinstance(shift_obj, dict):
+                                                                print(f"      Keys: {list(shift_obj.keys())}")
+                                                                print(f"      Full object:")
+                                                                print(json.dumps(shift_obj, indent=8))
+                                            except Exception as e:
+                                                print(f"      ⚠️ Could not parse pcIODataSetString: {e}")
+                                                print(f"      Raw value: {io_data_str[:200]}...")
+                                        else:
+                                            print(f"\n   ⚠️ pcIODataSetString is EMPTY in captured request!")
+                            except Exception as e:
+                                print(f"   ⚠️ Could not parse request body: {e}")
                         else:
-                            print(f"      {key}: {value}")
-                    if self.booking_body:
-                        body_preview = self.booking_body[:500] if len(self.booking_body) > 500 else self.booking_body
-                        print(f"   Request Body ({len(self.booking_body)} chars): {body_preview}")
-                        if len(self.booking_body) > 500:
-                            print(f"      ... (truncated, {len(self.booking_body) - 500} more chars)")
-                    else:
-                        print(f"   Request Body: None")
-                    print(f"{'='*80}\n")
+                            print(f"   Request Body: None")
+                        print(f"{'='*80}\n")
+                        # Save endpoints after capturing BOOKING endpoint
+                        self.save_endpoints()
         
-        # Also intercept responses to see what was actually sent
+        # Also intercept responses to see what was actually sent and capture errors
         async def handle_response(response):
             url = response.url
             request = response.request
             
             # Check if this is a Find request and we don't have the body yet
             if any(keyword in url.lower() for keyword in ['selfschedule', 'search', 'find', 'shift', 'schedule']):
-                if request.method == 'POST' and (not self.find_body or self.find_body is None):
-                    # Try to get request body from the response's request object
+                if 'updateselfschedules' not in url.lower():  # Don't process booking endpoint here
+                    if request.method == 'POST' and (not self.find_body or self.find_body is None):
+                        # Try to get request body from the response's request object
+                        try:
+                            post_data = await request.post_data()
+                            if post_data:
+                                self.find_body = post_data
+                                print(f"   ✅ Captured FIND request body from response: {post_data[:200]}...")
+                        except:
+                            pass
+            
+            # Check for booking responses to capture errors AND successful requests
+            if 'updateselfschedules' in url.lower() or any(keyword in url.lower() for keyword in ['assign', 'book', 'claim', 'update']):
+                if 'getselfschedules' not in url.lower():  # Exclude search endpoint
                     try:
-                        post_data = await request.post_data()
-                        if post_data:
-                            self.find_body = post_data
-                            print(f"   ✅ Captured FIND request body from response: {post_data[:200]}...")
-                    except:
-                        pass
+                        result_text = await response.text()
+                        result_json = json.loads(result_text) if result_text else {}
+                        
+                        # Try to capture the request body that was sent
+                        request_body = None
+                        try:
+                            request_body = await request.post_data()
+                        except:
+                            try:
+                                if hasattr(request, 'post_data_buffer') and request.post_data_buffer:
+                                    request_body = request.post_data_buffer.decode('utf-8')
+                            except:
+                                pass
+                        
+                        print(f"\n{'='*80}")
+                        print(f"📥 BOOKING API RESPONSE:")
+                        print(f"   URL: {url}")
+                        print(f"   Status: {response.status}")
+                        if isinstance(result_json, dict):
+                            pc_result = result_json.get('pcResult', 'N/A')
+                            pc_result_code = result_json.get('pcResultCode', 'N/A')
+                            pc_result_desc = result_json.get('pcResultDescription', 'N/A')
+                            print(f"   Result: {pc_result}")
+                            print(f"   Result Code: {pc_result_code}")
+                            print(f"   Description: {pc_result_desc}")
+                            
+                            # If successful, capture and print the FULL request body for comparison
+                            if pc_result == 'SUCCESS' or pc_result == 'OK' or pc_result_code == '0':
+                                print(f"   ✅ BOOKING SUCCESS!")
+                                if request_body:
+                                    print(f"\n{'='*80}")
+                                    print(f"🎯 SUCCESSFUL BOOKING REQUEST BODY (for comparison):")
+                                    print(f"   Full request body ({len(request_body)} chars):")
+                                    try:
+                                        # Try to parse and pretty print
+                                        req_json = json.loads(request_body) if isinstance(request_body, str) else request_body
+                                        print(json.dumps(req_json, indent=2))
+                                        
+                                        # Specifically check pcIODataSetString structure
+                                        if isinstance(req_json, dict) and 'pcIODataSetString' in req_json:
+                                            io_data_str = req_json['pcIODataSetString']
+                                            if io_data_str:
+                                                try:
+                                                    io_data = json.loads(io_data_str) if isinstance(io_data_str, str) else io_data_str
+                                                    print(f"\n   📋 pcIODataSetString structure:")
+                                                    print(json.dumps(io_data, indent=4))
+                                                except:
+                                                    print(f"   📋 pcIODataSetString (raw): {io_data_str}")
+                                            else:
+                                                print(f"   ⚠️ pcIODataSetString is EMPTY in successful request!")
+                                    except:
+                                        print(request_body)
+                                    print(f"{'='*80}\n")
+                            elif pc_result == 'ERROR' or pc_result_code != '0':
+                                print(f"   ⚠️ BOOKING FAILED: {pc_result_desc}")
+                        else:
+                            print(f"   Response: {result_text[:200]}...")
+                        print(f"{'='*80}\n")
+                    except Exception as e:
+                        print(f"   ⚠️ Error parsing booking response: {e}")
         
         page.on('request', handle_request)
         page.on('response', handle_response)
@@ -357,38 +554,9 @@ async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000
         async with session.request(**request_kwargs) as response:
             duration = (time.monotonic() - start_time) * 1000
             
-            print(f"   Response Status: {response.status}")
-            print(f"   Response Time: {duration:.1f}ms")
-            
             if response.status == 200:
                 result_json = await response.json()
-                print(f"   Response Body (first 300 chars): {str(result_json)[:300]}...")
-                
-                # DEBUG: Print full response structure
-                print(f"\n   🔍 FULL RESPONSE STRUCTURE:")
-                print(f"   Response type: {type(result_json)}")
-                if isinstance(result_json, dict):
-                    print(f"   Top-level keys: {list(result_json.keys())}")
-                    # Print each key and its type/sample
-                    for key, value in result_json.items():
-                        if isinstance(value, dict):
-                            print(f"      {key}: dict with keys: {list(value.keys())[:10]}")
-                        elif isinstance(value, list):
-                            print(f"      {key}: list with {len(value)} items")
-                            if value:
-                                print(f"         First item type: {type(value[0])}")
-                                if isinstance(value[0], dict):
-                                    print(f"         First item keys: {list(value[0].keys())[:10]}")
-                        else:
-                            print(f"      {key}: {type(value).__name__} = {str(value)[:100]}")
-                elif isinstance(result_json, list):
-                    print(f"   Response is a list with {len(result_json)} items")
-                    if result_json:
-                        print(f"   First item type: {type(result_json[0])}")
-                        if isinstance(result_json[0], dict):
-                            print(f"   First item keys: {list(result_json[0].keys())[:10]}")
-                
-                print(f"   → ✅ API search complete (took {duration:.1f}ms)")
+                print(f"   → ✅ API search complete ({duration:.1f}ms)")
                 return result_json, None
             else:
                 result_text = await response.text()
@@ -419,41 +587,217 @@ async def book_via_api_single(session, api_capture, shift_id, offset_ms=0, dry_r
         # Remove stale Cookie header - let aiohttp.ClientSession manage cookies from Playwright session
         headers.pop('Cookie', None)
         headers.pop('cookie', None)
-        body = api_capture.booking_body
         
-        # Modify body with shift_id
+        body = api_capture.booking_body
+        body_json = None
+        
+        # DEBUG: Print full captured booking body for investigation
+        print(f"\n{'='*80}")
+        print(f"🔍 INVESTIGATING BOOKING REQUEST:")
+        print(f"   Shift ID: {shift_id}")
+        print(f"   Captured body length: {len(body) if body else 0} chars")
+        if body:
+            print(f"   Full captured body:")
+            print(body)
+        print(f"{'='*80}\n")
+        
+        # Parse and modify body with shift_id
         if body and shift_id:
             try:
                 body_json = json.loads(body) if isinstance(body, str) else body
                 if isinstance(body_json, dict):
-                    # Try common field names
-                    for field in ['shiftId', 'id', '_id', 'shift_id', 'shiftID']:
-                        if field in body_json or not any(k in body_json for k in ['shiftId', 'id', '_id']):
-                            body_json[field] = shift_id
-                            break
-                    body = json.dumps(body_json)
-            except:
-                pass
+                    print(f"   📋 Parsed body structure - Top-level keys: {list(body_json.keys())}")
+                    
+                    # CRITICAL: pcIODataSetString must contain the shift data as a JSON string
+                    # The captured body has pcIODataSetString as empty, so we need to construct it
+                    if 'pcIODataSetString' in body_json:
+                        pc_io_data_str = body_json['pcIODataSetString']
+                        print(f"   🔍 Found 'pcIODataSetString': {repr(pc_io_data_str[:100]) if pc_io_data_str else 'EMPTY'}")
+                        
+                        # If empty, construct the proper structure
+                        if not pc_io_data_str or pc_io_data_str.strip() == '':
+                            print(f"   ⚠ pcIODataSetString is empty - constructing proper structure...")
+                            # Construct the input data structure similar to output structure
+                            # Based on Celayix API patterns, this should contain shift data
+                            io_data = {
+                                "dsShiftGroups": {
+                                    "ttShiftGroup": [
+                                        {
+                                            "shiftid": shift_id
+                                        }
+                                    ]
+                                }
+                            }
+                            body_json['pcIODataSetString'] = json.dumps(io_data)
+                            print(f"   ✅ Constructed pcIODataSetString with shiftid={shift_id}")
+                        else:
+                            # Try to parse existing pcIODataSetString and add shift
+                            try:
+                                io_data = json.loads(pc_io_data_str) if isinstance(pc_io_data_str, str) else pc_io_data_str
+                                if isinstance(io_data, dict):
+                                    print(f"      Parsed existing pcIODataSetString - keys: {list(io_data.keys())}")
+                                    
+                                    # Check for dsShiftGroups structure
+                                    if 'dsShiftGroups' in io_data:
+                                        ds_shift_groups = io_data['dsShiftGroups']
+                                        if isinstance(ds_shift_groups, dict):
+                                            if 'ttShiftGroup' in ds_shift_groups:
+                                                # Add shift to existing array
+                                                if isinstance(ds_shift_groups['ttShiftGroup'], list):
+                                                    ds_shift_groups['ttShiftGroup'].append({"shiftid": shift_id})
+                                                    print(f"   ✅ Added shiftid={shift_id} to existing ttShiftGroup array")
+                                                else:
+                                                    ds_shift_groups['ttShiftGroup'] = [{"shiftid": shift_id}]
+                                                    print(f"   ✅ Created new ttShiftGroup array with shiftid={shift_id}")
+                                            else:
+                                                # Create ttShiftGroup array
+                                                ds_shift_groups['ttShiftGroup'] = [{"shiftid": shift_id}]
+                                                print(f"   ✅ Created ttShiftGroup array with shiftid={shift_id}")
+                                        else:
+                                            # dsShiftGroups is not a dict, reconstruct
+                                            io_data = {
+                                                "dsShiftGroups": {
+                                                    "ttShiftGroup": [{"shiftid": shift_id}]
+                                                }
+                                            }
+                                            print(f"   ✅ Reconstructed dsShiftGroups with shiftid={shift_id}")
+                                    else:
+                                        # No dsShiftGroups, create it
+                                        io_data = {
+                                            "dsShiftGroups": {
+                                                "ttShiftGroup": [{"shiftid": shift_id}]
+                                            }
+                                        }
+                                        print(f"   ✅ Created dsShiftGroups structure with shiftid={shift_id}")
+                                    
+                                    body_json['pcIODataSetString'] = json.dumps(io_data)
+                            except Exception as e:
+                                print(f"      ⚠ Error parsing existing pcIODataSetString: {e}")
+                                # If parsing fails, construct new structure
+                                io_data = {
+                                    "dsShiftGroups": {
+                                        "ttShiftGroup": [{"shiftid": shift_id}]
+                                    }
+                                }
+                                body_json['pcIODataSetString'] = json.dumps(io_data)
+                                print(f"   ✅ Constructed new pcIODataSetString with shiftid={shift_id}")
+                    else:
+                        # No pcIODataSetString field, add it
+                        print(f"   ⚠ No 'pcIODataSetString' field - adding it...")
+                        io_data = {
+                            "dsShiftGroups": {
+                                "ttShiftGroup": [{"shiftid": shift_id}]
+                            }
+                        }
+                        body_json['pcIODataSetString'] = json.dumps(io_data)
+                        print(f"   ✅ Added pcIODataSetString with shiftid={shift_id}")
+                    
+                    # Remove any top-level shiftid we might have added (should be in pcIODataSetString)
+                    if 'shiftid' in body_json:
+                        del body_json['shiftid']
+                        print(f"   🧹 Removed top-level shiftid (should be in pcIODataSetString)")
+            except Exception as e:
+                print(f"      ⚠ Error parsing booking body: {e}")
+                import traceback
+                traceback.print_exc()
+                # If parsing fails, construct a minimal valid body
+                body_json = {
+                    'pcwxSessionID': api_capture.booking_body.get('pcwxSessionID', '') if isinstance(api_capture.booking_body, dict) else '',
+                    'pcServiceName': 'UpdateSelfSchedules',
+                    'pcIODataSetString': json.dumps({
+                        "dsShiftGroups": {
+                            "ttShiftGroup": [{"shiftid": shift_id}]
+                        }
+                    })
+                }
+                if body:
+                    try:
+                        temp_body = json.loads(body) if isinstance(body, str) else body
+                        if isinstance(temp_body, dict):
+                            body_json['pcwxSessionID'] = temp_body.get('pcwxSessionID', body_json['pcwxSessionID'])
+                            body_json['pcContextString'] = temp_body.get('pcContextString', '')
+                            body_json['piClientVersion'] = temp_body.get('piClientVersion', '')
+                    except:
+                        pass
+        elif shift_id:
+            # No captured body, construct a minimal one
+            print(f"   ⚠ No captured body - constructing minimal body")
+            body_json = {
+                'pcServiceName': 'UpdateSelfSchedules',
+                'pcIODataSetString': json.dumps({
+                    "dsShiftGroups": {
+                        "ttShiftGroup": [{"shiftid": shift_id}]
+                    }
+                })
+            }
         
-        print(f"   📤 Booking Request #{offset_ms//2 + 1}: {api_capture.booking_method} {api_capture.booking_endpoint}")
-        print(f"      Body: {body[:200] if body else 'None'}...")
+        # DEBUG: Print what we're about to send
+        print(f"\n{'='*80}")
+        print(f"📤 REQUEST BODY WE'RE SENDING:")
+        if body_json:
+            print(json.dumps(body_json, indent=2))
+        else:
+            print("   (No body)")
+        print(f"{'='*80}\n")
+        
+        # Set Content-Type for JSON requests
+        if body_json is not None:
+            headers['Content-Type'] = 'application/json; charset=UTF-8'
         
         start_time = time.monotonic()
         async with session.request(
             method=api_capture.booking_method,
             url=api_capture.booking_endpoint,
             headers=headers,
-            data=body
+            json=body_json if body_json is not None else None,
+            data=body if body_json is None and body else None
         ) as response:
             duration = (time.monotonic() - start_time) * 1000
-            result = await response.text()
+            result_text = await response.text()
             
-            print(f"      Response: {response.status} ({duration:.1f}ms) - {result[:100]}...")
+            # DEBUG: Print full response for investigation
+            print(f"\n{'='*80}")
+            print(f"📥 FULL API RESPONSE:")
+            print(f"   Status: {response.status}")
+            print(f"   Response body:")
+            try:
+                result_json = json.loads(result_text)
+                print(json.dumps(result_json, indent=2))
+            except:
+                print(result_text)
+            print(f"{'='*80}\n")
+            
+            # Parse response to check for Celayix error format
+            success = False
+            error_msg = None
             
             if response.status in [200, 201]:
+                try:
+                    result_json = json.loads(result_text) if result_text else {}
+                    # Check Celayix response format
+                    if isinstance(result_json, dict):
+                        pc_result = result_json.get('pcResult', '').upper()
+                        if pc_result == 'SUCCESS' or pc_result == 'OK':
+                            success = True
+                        elif pc_result == 'ERROR':
+                            error_msg = result_json.get('pcResultDescription', 'Unknown error')
+                            print(f"      ⚠ API Error: {error_msg}")
+                        else:
+                            # If no pcResult field, assume success for 200/201
+                            success = True
+                    else:
+                        # Non-JSON response, assume success for 200/201
+                        success = True
+                except:
+                    # If parsing fails, assume success for 200/201
+                    success = True
+            else:
+                error_msg = f"HTTP {response.status}"
+            
+            if success:
                 return True, f"Success ({duration:.1f}ms)"
             else:
-                return False, f"Failed {response.status} ({duration:.1f}ms)"
+                return False, error_msg or f"Failed {response.status} ({duration:.1f}ms)"
     except Exception as e:
         return False, str(e)
 
@@ -470,7 +814,7 @@ async def book_via_api_parallel(session, api_capture, shift_id, num_attempts=5, 
         print(f"    → DRY-RUN: would send {num_attempts} parallel booking requests")
         return True, "Dry run"
     
-    print(f"\n🚀 Sending {num_attempts} parallel booking requests for shift_id={shift_id}")
+    print(f"\n🚀 Booking shift_id={shift_id} ({num_attempts} parallel attempts)")
     
     # Create parallel tasks with slight offsets (0ms, 2ms, 4ms, 6ms, 8ms)
     tasks = [
@@ -488,10 +832,10 @@ async def book_via_api_parallel(session, api_capture, shift_id, num_attempts=5, 
             continue
         success, msg = result
         if success:
-            print(f"    → ✅ BOOKED via API (attempt {i+1}, {total_duration:.1f}ms total)")
+            print(f"    ✅ BOOKED via API (attempt {i+1}, {total_duration:.1f}ms)")
             return True, msg
     
-    print(f"    → ✗ All {num_attempts} parallel attempts failed ({total_duration:.1f}ms)")
+    print(f"    ✗ All {num_attempts} attempts failed ({total_duration:.1f}ms)")
     return False, "All attempts failed"
 
 
@@ -603,18 +947,13 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
             # Check pcOutDataSetString for shifts (this is where Celayix actually stores shifts!)
             if not shifts and 'pcOutDataSetString' in shifts_data:
                 pc_out_data = shifts_data['pcOutDataSetString']
-                print(f"   🔍 Checking pcOutDataSetString structure...")
                 if isinstance(pc_out_data, dict):
-                    print(f"      pcOutDataSetString keys: {list(pc_out_data.keys())}")
                     # Check dsShiftGroups - this is the actual shifts array
                     if 'dsShiftGroups' in pc_out_data:
                         ds_shift_groups = pc_out_data['dsShiftGroups']
-                        print(f"      dsShiftGroups type: {type(ds_shift_groups)}")
                         if isinstance(ds_shift_groups, list):
                             shifts = ds_shift_groups
-                            print(f"      ✅ Found shifts as list in dsShiftGroups: {len(shifts)} items")
                         elif isinstance(ds_shift_groups, dict):
-                            print(f"      dsShiftGroups dict keys: {list(ds_shift_groups.keys())}")
                             # Might be nested further - check common keys
                             shifts = (
                                 ds_shift_groups.get('shifts') or
@@ -628,28 +967,20 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
                                 for key, value in ds_shift_groups.items():
                                     if isinstance(value, list) and value:
                                         shifts = value
-                                        print(f"      ✅ Found shifts in pcOutDataSetString['dsShiftGroups']['{key}']: {len(shifts)} items")
                                         break
                                     elif isinstance(value, dict):
                                         # Check one level deeper
                                         for sub_key, sub_value in value.items():
                                             if isinstance(sub_value, list) and sub_value:
                                                 shifts = sub_value
-                                                print(f"      ✅ Found shifts in pcOutDataSetString['dsShiftGroups']['{key}']['{sub_key}']: {len(shifts)} items")
                                                 break
                                         if shifts:
                                             break
         
         print(f"   Found {len(shifts)} shift(s) in API response")
-        if shifts:
-            print(f"   First shift data: {str(shifts[0])[:200]}...")
-            # DEBUG: Print structure of first shift
-            if isinstance(shifts[0], dict):
-                print(f"   First shift keys: {list(shifts[0].keys())[:20]}")
         
         if not shifts:
             print(f"    ⚠ No shifts in API response")
-            print(f"    🔍 DEBUG: Full response structure printed above - check where shifts might be located")
             return False
         
         # Step 3: Get first shift ID
@@ -666,13 +997,9 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
                 first_shift.get('ShiftID') or
                 first_shift.get('ShiftId')
             )
-            print(f"   Extracted shift_id: {shift_id}")
-            print(f"   Full shift keys: {list(first_shift.keys())}")
         
         if not shift_id:
             print(f"    ⚠ Could not extract shift ID from API response")
-            print(f"    → Response keys: {list(first_shift.keys()) if isinstance(first_shift, dict) else 'not a dict'}")
-            print(f"    Full first shift object: {first_shift}")
             return await try_book_shifts_optimized(page, dry_run, timeout)
         
         # Step 4: Book via API with parallel attempts (maximum speed + success rate)
@@ -742,9 +1069,7 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
         
         print(f"    {'='*60}\n")
 
-        print(f"    ✅ Shift ID captured successfully: {shift_id}")
-        print(f"    🛑 Skipping booking (test mode)")
-        return True
+        print(f"    ✅ Shift ID captured: {shift_id}")
         
         booking_success, booking_result = await book_via_api_parallel(
             session, api_capture, shift_id, num_attempts=parallel_attempts, dry_run=dry_run
@@ -755,8 +1080,12 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
             print(f"    ✅ TOTAL BOT-COMPETITION TIME: {total_duration:.1f}ms (API + Parallel)")
             return True
         else:
-            print(f"    ⚠ API booking failed, falling back to Playwright...")
-            return await try_book_shifts_optimized(page, dry_run, timeout)
+            print(f"    ⚠ API booking failed: {booking_result}")
+            print(f"    → Falling back to Playwright...")
+            # Don't click Find - the shift is already visible on the page from the initial search
+            # Just look for it directly
+            print(f"    → Looking for shift card on page (already visible)...")
+            return await try_book_shifts_optimized(page, dry_run, timeout=10000)
 
 
 async def capture_api_endpoints(page, api_capture):
@@ -812,24 +1141,58 @@ async def capture_api_endpoints(page, api_capture):
 async def try_book_shifts_optimized(page, dry_run=True, timeout=5000):
     """
     OPTIMIZED for hot-drop scenarios:
-    - Aggressively polls for shift cards (every 10-50ms)
-    - Clicks first matching shift IMMEDIATELY when it appears
-    - Pre-prepared selectors for minimal latency
-    - No parsing all shifts first - click-first strategy
+    - Uses exact selector from user's HTML
+    - Clicks shift card and Schedule me button
     """
     start_time = time.monotonic()
-    card_selector = "div.cx-list-item.pointer-cursor"
-    schedule_btn_selector = "button.cx-button:has-text('Schedule me')"
+    # Try multiple selectors - the classes might be in different order or have whitespace
+    shift_selectors = [
+        "div.cx-list-item.cx-item-icon-0.pointer-cursor",  # Exact match
+        "div.cx-list-item.pointer-cursor.cx-item-icon-0",  # Different order
+        "div[class*='cx-list-item'][class*='cx-item-icon-0'][class*='pointer-cursor']",  # Attribute contains
+        "div.cx-list-item.pointer-cursor",  # Without icon class
+        "div.cx-list-item"  # Most basic
+    ]
     
-    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 🔥 HOT-DROP MODE: Aggressively watching for shifts...")
+    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 🔥 HOT-DROP MODE: Watching for shifts...")
     
     # Aggressive polling: check every 10ms for maximum speed
+    check_count = 0
     while (time.monotonic() - start_time) * 1000 < timeout:
-        # Check for shift cards immediately
-        cards = await page.query_selector_all(card_selector)
+        # Try each selector until we find cards
+        cards = []
+        for selector in shift_selectors:
+            try:
+                found = await page.query_selector_all(selector)
+                if found:
+                    # Filter to only visible ones
+                    for card in found:
+                        try:
+                            if await card.is_visible():
+                                cards.append(card)
+                        except:
+                            cards.append(card)
+                    if cards:
+                        if check_count < 3:
+                            print(f"    🔍 Found {len(cards)} card(s) with selector: {selector}")
+                        break
+            except:
+                continue
+        
+        # Debug: print first few checks
+        if check_count < 3:
+            if cards:
+                try:
+                    text = await cards[0].inner_text()
+                    print(f"    🔍 Found {len(cards)} card(s)! Text: {text[:50]}...")
+                except:
+                    print(f"    🔍 Found {len(cards)} card(s)!")
+            else:
+                print(f"    🔍 Check {check_count + 1}: No cards found yet")
+        check_count += 1
         
         if cards:
-            # Found shift(s)! Click the first one immediately
+            # Found shift! Click the first one
             first_card = cards[0]
             
             # Quick validation: get basic info
@@ -843,37 +1206,52 @@ async def try_book_shifts_optimized(page, dry_run=True, timeout=5000):
                 print(f"    → DRY-RUN: would click shift card + 'Schedule me'")
                 return True
             
-            # Click shift card IMMEDIATELY
+            # Click shift card
             click_start = time.monotonic()
             await first_card.click()
             click_duration = (time.monotonic() - click_start) * 1000
             print(f"    → CLICKED shift card (took {click_duration:.1f}ms)")
             
-            # Immediately look for Schedule me button (already have selector ready)
-            schedule_btn = await page.query_selector(schedule_btn_selector)
+            # Wait a bit for Schedule me button to appear
+            await asyncio.sleep(0.2)
+            
+            # Find and click Schedule me button - try multiple selectors
+            schedule_btn = await page.query_selector("button.cx-button:has-text('Schedule me')")
+            if not schedule_btn:
+                schedule_btn = await page.query_selector("button:has-text('Schedule me')")
+            if not schedule_btn:
+                schedule_btn = await page.query_selector("button[type='button']:has-text('Schedule me')")
+            
             if schedule_btn:
                 schedule_start = time.monotonic()
                 await schedule_btn.click()
                 schedule_duration = (time.monotonic() - schedule_start) * 1000
-                total_duration = (time.monotonic() - start_time) * 1000
+                
+                # Wait for the booking API response to be captured
                 print(f"    → CLICKED 'Schedule me' (took {schedule_duration:.1f}ms)")
-                print(f"    ✅ TOTAL BOOKING TIME: {total_duration:.1f}ms from shift appearance")
+                print(f"    ⏳ Waiting for booking response...")
+                await asyncio.sleep(1)  # Give time for API response to be captured
+                
+                total_duration = (time.monotonic() - start_time) * 1000
+                print(f"    ✅ BOOKED! Total time: {total_duration:.1f}ms")
                 return True
             else:
-                print(f"    ⚠ Shift clicked but 'Schedule me' button not found yet")
-                # Fallback: wait a tiny bit and retry
-                await asyncio.sleep(0.05)
-                schedule_btn = await page.query_selector(schedule_btn_selector)
+                print(f"    ⚠ Shift clicked but 'Schedule me' button not found")
+                # Wait a bit more and retry
+                await asyncio.sleep(0.3)
+                schedule_btn = await page.query_selector("button:has-text('Schedule me')")
                 if schedule_btn:
                     await schedule_btn.click()
                     print(f"    → CLICKED 'Schedule me' (retry successful)")
+                    # Wait for the booking API response to be captured
+                    await asyncio.sleep(1)
                     return True
                 else:
                     print(f"    ✗ Could not find 'Schedule me' button")
                     return False
         
-        # No shifts yet - wait 1-2ms and check again (ultra-aggressive polling for bot competition)
-        await asyncio.sleep(0.001)  # 1ms polling for maximum speed
+        # No shifts yet - wait 10ms and check again
+        await asyncio.sleep(0.01)
     
     # Timeout - no shifts found
     elapsed = (time.monotonic() - start_time) * 1000
@@ -947,7 +1325,6 @@ async def parse_shifts(page):
     for selector in card_selectors:
         cards = await page.query_selector_all(selector)
         if cards:
-            print(f"DEBUG: found {len(cards)} clickable shift cards using selector: {selector}")
             break
     
     if cards:
@@ -982,16 +1359,13 @@ async def parse_shifts(page):
 
     # Fallback: try real checkbox inputs first
     checkboxes = await page.query_selector_all("input[type='checkbox']")
-    print(f"DEBUG: found {len(checkboxes)} input[type='checkbox']")
 
     # If nothing, try ARIA role="checkbox"
     if not checkboxes:
         aria_boxes = await page.query_selector_all("[role='checkbox']")
-        print(f"DEBUG: found {len(aria_boxes)} [role='checkbox']")
         checkboxes = aria_boxes
 
     if not checkboxes:
-        print("DEBUG: still no checkbox-like elements found; probably no open shifts for this range.")
         return []
 
     for i, cb in enumerate(checkboxes):
@@ -1018,7 +1392,6 @@ async def parse_shifts(page):
         }
         shifts.append(shift)
 
-    print(f"DEBUG: treating {len(shifts)} checkbox-like elements as shift candidates")
     return shifts
 
 
@@ -1659,36 +2032,30 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
                 print("  ⚠ aiohttp not installed - using Playwright-only mode (slower)\n")
                 print("  💡 Install with: pip install aiohttp for bot competition mode\n")
             
-            # Do initial search
-            await page.click('button.cx-button[type="submit"]')
-            await page.wait_for_load_state("networkidle")
+            # Don't click Find again - we already clicked it during endpoint capture
+            # The shifts are already on the page from that click - try to book them IMMEDIATELY!
             
-            # Wait a bit for shifts to load and for endpoints to be captured
-            await asyncio.sleep(2)
+            # First, try to book the shift that's already visible (no booking endpoint yet, so use Playwright)
+            print("  → Shift is already visible from capture - trying to book it immediately...")
+            booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=10000)
             
-            # Re-check if endpoints were captured after Find click (in case initial capture failed)
-            if not hybrid_mode_available and api_capture.is_ready():
-                print("  ✅ API endpoints captured after Find click - enabling bot competition mode!")
-                hybrid_mode_available = True
-            
-            # Wait for API cooldown (5 seconds) before making API calls
-            # The API has a 5-second rate limit, so we need to wait after clicking Find
-            if hybrid_mode_available:
-                print("  ⏳ Waiting 6 seconds for API cooldown (5s required + 1s buffer)...")
-                await asyncio.sleep(6)
-            
-            # Try bot competition mode if available, else fall back to Playwright
-            if hybrid_mode_available:
-                print("\n📋 BOT COMPETITION MODE: Using direct API calls...")
-                booking_success = await try_book_shifts_hybrid(
-                    page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
-                    parallel_attempts=5, start_date_str=start_str
-                )
-                if not booking_success:
-                    print("  → Falling back to Playwright mode...")
-                    await try_book_shifts(page, dry_run=dry_run)
+            if booking_success:
+                print("  ✅ Booked the visible shift!")
             else:
-                await try_book_shifts(page, dry_run=dry_run)
+                # If Playwright didn't work, wait for API cooldown and try API
+                if hybrid_mode_available:
+                    print("  ⏳ Playwright didn't work, waiting for API cooldown then trying API...")
+                    await asyncio.sleep(6)
+                    print("\n📋 BOT COMPETITION MODE: Using direct API calls...")
+                    booking_success = await try_book_shifts_hybrid(
+                        page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
+                        parallel_attempts=5, start_date_str=start_str
+                    )
+                    if not booking_success:
+                        print("  → Falling back to Playwright mode...")
+                        await try_book_shifts(page, dry_run=dry_run)
+                else:
+                    await try_book_shifts(page, dry_run=dry_run)
         last_search_time = time.monotonic()
 
         while True:
@@ -1700,34 +2067,52 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
             if elapsed < min_gap:
                 await asyncio.sleep((min_gap - elapsed) + 0.3)  # small safety buffer
 
+            # In hybrid mode, use API calls (NO Find click - API doesn't trigger page cooldown)
+            if hybrid_mode_available:
+                print("\n📋 BOT COMPETITION MODE: Using direct API calls (no Find click needed)...")
+                booking_success = await try_book_shifts_hybrid(
+                    page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
+                    parallel_attempts=5, start_date_str=start_str
+                )
+                if not booking_success:
+                    print("  → Falling back to Playwright mode...")
+                    await try_book_shifts(page, dry_run=dry_run)
+                last_search_time = time.monotonic()
+                continue  # Skip Find click - we used API instead
+            
+            # Only click Find if NOT in hybrid mode (Playwright-only mode)
+            # Check if shift is already visible before clicking Find again (avoid cooldown)
+            try:
+                existing_shifts = await page.query_selector_all("div.cx-list-item.cx-item-icon-0.pointer-cursor")
+                if not existing_shifts:
+                    existing_shifts = await page.query_selector_all("div[class*='cx-list-item'][class*='pointer-cursor']")
+                if existing_shifts:
+                    print("  → Shift already visible, trying to book it instead of clicking Find")
+                    booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
+                    if booking_success:
+                        print("  ✅ Booked existing shift!")
+                        last_search_time = time.monotonic()
+                        continue
+            except:
+                pass
+
+            # Only click Find if we're in Playwright-only mode and no shift is visible
+            print("  → Clicking Find to search for shifts...")
             await page.click('button.cx-button[type="submit"]')
             await page.wait_for_load_state("networkidle")
             last_search_time = time.monotonic()
             
-            # Wait a bit for shifts to load and for endpoints to be captured
+            # Wait a bit for shifts to load
             await asyncio.sleep(2)
             
             # Re-check if endpoints were captured after Find click (in case initial capture failed)
             if not hybrid_mode_available and api_capture.is_ready():
                 print("  ✅ API endpoints captured after Find click - enabling bot competition mode!")
                 hybrid_mode_available = True
-            
-            # Wait for API cooldown before making API calls (if using hybrid mode)
-            # Note: We already wait 11+ seconds between searches, but add extra safety buffer
-            if hybrid_mode_available:
-                print("  ⏳ Waiting 6 seconds for API cooldown...")
-                await asyncio.sleep(6)
+                continue  # Skip Playwright booking, use API next time
 
-            # Try bot competition mode if available, else fall back to Playwright
-            if hybrid_mode_available:
-                booking_success = await try_book_shifts_hybrid(
-                    page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
-                    parallel_attempts=5, start_date_str=start_str
-                )
-                if not booking_success:
-                    await try_book_shifts(page, dry_run=dry_run)
-            else:
-                await try_book_shifts(page, dry_run=dry_run)
+            # Try Playwright booking
+            await try_book_shifts(page, dry_run=dry_run)
         
         # Keep browser open for a moment to see results (only in precise timing mode)
         if target_time:

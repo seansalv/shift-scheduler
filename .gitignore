@@ -2,3 +2,4 @@ venv/
 .env
 dummy_login.html
 dummy_shifts.html
+captured_endpoints.json
