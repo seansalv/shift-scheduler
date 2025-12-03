@@ -47,6 +47,42 @@ def format_celayix_date_short(d: date) -> str:
     # "11/23/25"
     return d.strftime("%m/%d/%y")
 
+def parse_start_date(date_str: str = None) -> date:
+    """
+    Parse start date from MM/DD/YY format or default to today
+    Returns: date object
+    """
+    if date_str:
+        try:
+            # Try parsing MM/DD/YY format
+            return datetime.strptime(date_str, "%m/%d/%y").date()
+        except ValueError:
+            try:
+                # Try parsing MM/DD/YYYY format
+                return datetime.strptime(date_str, "%m/%d/%Y").date()
+            except ValueError:
+                print(f"⚠️  Could not parse start date '{date_str}', defaulting to today")
+                return date.today()
+    return date.today()
+
+def parse_end_date(date_str: str = None, days_ahead: int = 6) -> date:
+    """
+    Parse end date from MM/DD/YY format or default to today + days_ahead
+    Returns: date object
+    """
+    if date_str:
+        try:
+            # Try parsing MM/DD/YY format
+            return datetime.strptime(date_str, "%m/%d/%y").date()
+        except ValueError:
+            try:
+                # Try parsing MM/DD/YYYY format
+                return datetime.strptime(date_str, "%m/%d/%Y").date()
+            except ValueError:
+                print(f"⚠️  Could not parse end date '{date_str}', defaulting to today + {days_ahead} days")
+                return get_next_week_end(days_ahead)
+    return get_next_week_end(days_ahead)
+
 def shift_matches_rules(shift):
     """
     Simple filter function.
@@ -105,10 +141,32 @@ class APIEndpointCapture:
                         self.find_endpoint = url
                         self.find_method = method
                         self.find_headers = dict(request.headers)
+                        
+                        # Try multiple methods to capture request body
+                        body = None
                         try:
-                            self.find_body = await request.post_data()
+                            body = await request.post_data()
                         except:
-                            self.find_body = None
+                            pass
+                        
+                        # If post_data() didn't work, try getting it from the request body buffer
+                        if not body:
+                            try:
+                                post_data_buffer = request.post_data_buffer
+                                if post_data_buffer:
+                                    body = post_data_buffer.decode('utf-8')
+                            except:
+                                pass
+                        
+                        # If still no body, try to get it from the request
+                        if not body and method == 'POST':
+                            try:
+                                # Intercept the route to capture the body
+                                pass  # Will handle in route interception
+                            except:
+                                pass
+                        
+                        self.find_body = body
                         print(f"\n{'='*80}")
                         print(f"🔍 Captured FIND endpoint:")
                         print(f"   Method: {method}")
@@ -126,7 +184,7 @@ class APIEndpointCapture:
                             if len(self.find_body) > 500:
                                 print(f"      ... (truncated, {len(self.find_body) - 500} more chars)")
                         else:
-                            print(f"   Request Body: None (GET request or empty)")
+                            print(f"   Request Body: None - will construct from dates")
                         print(f"{'='*80}\n")
             
             # Capture booking API call
@@ -135,10 +193,23 @@ class APIEndpointCapture:
                     self.booking_endpoint = url
                     self.booking_method = method
                     self.booking_headers = dict(request.headers)
+                    
+                    # Try multiple methods to capture request body
+                    body = None
                     try:
-                        self.booking_body = await request.post_data()
+                        body = await request.post_data()
                     except:
-                        self.booking_body = None
+                        pass
+                    
+                    if not body:
+                        try:
+                            post_data_buffer = request.post_data_buffer
+                            if post_data_buffer:
+                                body = post_data_buffer.decode('utf-8')
+                        except:
+                            pass
+                    
+                    self.booking_body = body
                     print(f"\n{'='*80}")
                     print(f"🔍 Captured BOOKING endpoint:")
                     print(f"   Method: {method}")
@@ -159,7 +230,25 @@ class APIEndpointCapture:
                         print(f"   Request Body: None")
                     print(f"{'='*80}\n")
         
+        # Also intercept responses to see what was actually sent
+        async def handle_response(response):
+            url = response.url
+            request = response.request
+            
+            # Check if this is a Find request and we don't have the body yet
+            if any(keyword in url.lower() for keyword in ['selfschedule', 'search', 'find', 'shift', 'schedule']):
+                if request.method == 'POST' and (not self.find_body or self.find_body is None):
+                    # Try to get request body from the response's request object
+                    try:
+                        post_data = await request.post_data()
+                        if post_data:
+                            self.find_body = post_data
+                            print(f"   ✅ Captured FIND request body from response: {post_data[:200]}...")
+                    except:
+                        pass
+        
         page.on('request', handle_request)
+        page.on('response', handle_response)
     
     def is_ready(self):
         """Check if we've captured the necessary endpoints"""
@@ -175,7 +264,7 @@ async def extract_cookies_from_page(page):
     return cookie_dict
 
 
-async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000):
+async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000, start_date_str=None):
     """
     BOT COMPETITION: Search for shifts using direct API call (5-20ms vs 50-200ms)
     Returns shifts as JSON (much faster than DOM parsing)
@@ -185,21 +274,54 @@ async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000
     
     try:
         headers = dict(api_capture.find_headers) if api_capture.find_headers else {}
+        # Remove stale Cookie header - let aiohttp.ClientSession manage cookies from Playwright session
+        headers.pop('Cookie', None)
+        headers.pop('cookie', None)
+        
+        # Ensure Content-Type is set for POST requests with JSON body
+        if api_capture.find_method in ['POST', 'PUT']:
+            if 'content-type' not in headers and 'Content-Type' not in headers:
+                headers['Content-Type'] = 'application/json; charset=UTF-8'
+        
         url = api_capture.find_endpoint
         body = api_capture.find_body
         
-        # Modify body/params with end date
+        # Modify body/params with start and end dates
         if api_capture.find_method == 'GET':
             separator = '&' if '?' in url else '?'
-            url = f"{url}{separator}endDate={end_date_str}"
+            if start_date_str:
+                url = f"{url}{separator}startDate={start_date_str}&endDate={end_date_str}"
+            else:
+                url = f"{url}{separator}endDate={end_date_str}"
         else:
-            try:
-                body_json = json.loads(body) if isinstance(body, str) else (body or {})
-                if isinstance(body_json, dict):
-                    body_json['endDate'] = end_date_str
+            # POST/PUT request - construct or modify body
+            if not body:
+                # Construct body from scratch if not captured
+                body_json = {
+                    'endDate': end_date_str
+                }
+                if start_date_str:
+                    body_json['startDate'] = start_date_str
+                body = json.dumps(body_json)
+                print(f"   ⚠ Request body was None - constructed: {body}")
+            else:
+                # Modify existing body
+                try:
+                    body_json = json.loads(body) if isinstance(body, str) else (body if isinstance(body, dict) else {})
+                    if isinstance(body_json, dict):
+                        body_json['endDate'] = end_date_str
+                        if start_date_str:
+                            body_json['startDate'] = start_date_str
+                        body = json.dumps(body_json)
+                except Exception as e:
+                    # If parsing fails, construct new body
+                    print(f"   ⚠ Failed to parse existing body: {e} - constructing new body")
+                    body_json = {
+                        'endDate': end_date_str
+                    }
+                    if start_date_str:
+                        body_json['startDate'] = start_date_str
                     body = json.dumps(body_json)
-            except:
-                pass
         
         print(f"\n📡 Sending FIND API request:")
         print(f"   Method: {api_capture.find_method}")
@@ -207,13 +329,32 @@ async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000
         print(f"   Modified Body: {body[:200] if body else 'None'}...")
         
         start_time = time.monotonic()
-        async with session.request(
-            method=api_capture.find_method,
-            url=url,
-            headers=headers,
-            data=body,
-            timeout=aiohttp.ClientTimeout(total=timeout/1000)
-        ) as response:
+        
+        # For POST/PUT with JSON, use json parameter; for GET or non-JSON, use data
+        request_kwargs = {
+            'method': api_capture.find_method,
+            'url': url,
+            'headers': headers,
+            'timeout': aiohttp.ClientTimeout(total=timeout/1000)
+        }
+        
+        if api_capture.find_method in ['POST', 'PUT'] and body:
+            try:
+                # Try to parse as JSON and use json parameter
+                body_json = json.loads(body) if isinstance(body, str) else body
+                request_kwargs['json'] = body_json
+            except:
+                # If not JSON, use data parameter
+                request_kwargs['data'] = body
+        elif api_capture.find_method == 'GET':
+            # GET requests don't have body
+            pass
+        else:
+            # Fallback: use data
+            if body:
+                request_kwargs['data'] = body
+        
+        async with session.request(**request_kwargs) as response:
             duration = (time.monotonic() - start_time) * 1000
             
             print(f"   Response Status: {response.status}")
@@ -222,6 +363,31 @@ async def search_shifts_via_api(session, api_capture, end_date_str, timeout=5000
             if response.status == 200:
                 result_json = await response.json()
                 print(f"   Response Body (first 300 chars): {str(result_json)[:300]}...")
+                
+                # DEBUG: Print full response structure
+                print(f"\n   🔍 FULL RESPONSE STRUCTURE:")
+                print(f"   Response type: {type(result_json)}")
+                if isinstance(result_json, dict):
+                    print(f"   Top-level keys: {list(result_json.keys())}")
+                    # Print each key and its type/sample
+                    for key, value in result_json.items():
+                        if isinstance(value, dict):
+                            print(f"      {key}: dict with keys: {list(value.keys())[:10]}")
+                        elif isinstance(value, list):
+                            print(f"      {key}: list with {len(value)} items")
+                            if value:
+                                print(f"         First item type: {type(value[0])}")
+                                if isinstance(value[0], dict):
+                                    print(f"         First item keys: {list(value[0].keys())[:10]}")
+                        else:
+                            print(f"      {key}: {type(value).__name__} = {str(value)[:100]}")
+                elif isinstance(result_json, list):
+                    print(f"   Response is a list with {len(result_json)} items")
+                    if result_json:
+                        print(f"   First item type: {type(result_json[0])}")
+                        if isinstance(result_json[0], dict):
+                            print(f"   First item keys: {list(result_json[0].keys())[:10]}")
+                
                 print(f"   → ✅ API search complete (took {duration:.1f}ms)")
                 return result_json, None
             else:
@@ -250,6 +416,9 @@ async def book_via_api_single(session, api_capture, shift_id, offset_ms=0, dry_r
     
     try:
         headers = dict(api_capture.booking_headers) if api_capture.booking_headers else {}
+        # Remove stale Cookie header - let aiohttp.ClientSession manage cookies from Playwright session
+        headers.pop('Cookie', None)
+        headers.pop('cookie', None)
         body = api_capture.booking_body
         
         # Modify body with shift_id
@@ -326,7 +495,7 @@ async def book_via_api_parallel(session, api_capture, shift_id, num_attempts=5, 
     return False, "All attempts failed"
 
 
-async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, timeout=5000, parallel_attempts=5, target_drop_time=None):
+async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, timeout=5000, parallel_attempts=5, target_drop_time=None, start_date_str=None):
     """
     BOT COMPETITION: Fastest booking method using direct API calls
     - Uses direct API calls (no DOM parsing) = 5-20ms
@@ -355,6 +524,8 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
     
     print(f"\n{'='*80}")
     print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] 🚀 BOT COMPETITION MODE: Direct API calls...")
+    if start_date_str:
+        print(f"   Start Date: {start_date_str}")
     print(f"   End Date: {end_date_str}")
     print(f"   Target Drop Time: {target_drop_time.strftime('%H:%M:%S') if target_drop_time else 'N/A'}")
     print(f"   Parallel Attempts: {parallel_attempts}")
@@ -366,7 +537,7 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
     async with aiohttp.ClientSession(cookies=cookies) as session:
         # Step 1: Search for shifts via API (ultra-fast)
         start_time = time.monotonic()
-        shifts_data, error = await search_shifts_via_api(session, api_capture, end_date_str, timeout)
+        shifts_data, error = await search_shifts_via_api(session, api_capture, end_date_str, timeout, start_date_str)
         
         if error:
             print(f"    ⚠ API search failed: {error}")
@@ -383,21 +554,118 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
         if isinstance(shifts_data, list):
             shifts = shifts_data
         elif isinstance(shifts_data, dict):
-            shifts = shifts_data.get('shifts', shifts_data.get('data', shifts_data.get('items', [])))
+            # Try multiple possible locations for shifts
+            shifts = (
+                shifts_data.get('shifts') or
+                shifts_data.get('data') or
+                shifts_data.get('items') or
+                shifts_data.get('results') or
+                []
+            )
+            
+            # If not found at top level, check nested structures
+            if not shifts:
+                # Check pcContextString if it exists
+                if 'pcContextString' in shifts_data:
+                    pc_context = shifts_data['pcContextString']
+                    if isinstance(pc_context, dict):
+                        shifts = (
+                            pc_context.get('shifts') or
+                            pc_context.get('data') or
+                            pc_context.get('items') or
+                            pc_context.get('results') or
+                            []
+                        )
+                        # Check nested dsContext
+                        if not shifts and 'dsContext' in pc_context:
+                            ds_context = pc_context['dsContext']
+                            if isinstance(ds_context, dict):
+                                shifts = (
+                                    ds_context.get('shifts') or
+                                    ds_context.get('data') or
+                                    ds_context.get('items') or
+                                    ds_context.get('results') or
+                                    []
+                                )
+                                # Check ttContext array
+                                if not shifts and 'ttContext' in ds_context:
+                                    tt_context = ds_context['ttContext']
+                                    if isinstance(tt_context, list) and tt_context:
+                                        # Look for shift data in context items
+                                        for item in tt_context:
+                                            if isinstance(item, dict):
+                                                # Check if this item contains shift data
+                                                if 'shifts' in item or 'data' in item:
+                                                    shifts = item.get('shifts') or item.get('data') or []
+                                                    if shifts:
+                                                        break
+            
+            # Check pcOutDataSetString for shifts (this is where Celayix actually stores shifts!)
+            if not shifts and 'pcOutDataSetString' in shifts_data:
+                pc_out_data = shifts_data['pcOutDataSetString']
+                print(f"   🔍 Checking pcOutDataSetString structure...")
+                if isinstance(pc_out_data, dict):
+                    print(f"      pcOutDataSetString keys: {list(pc_out_data.keys())}")
+                    # Check dsShiftGroups - this is the actual shifts array
+                    if 'dsShiftGroups' in pc_out_data:
+                        ds_shift_groups = pc_out_data['dsShiftGroups']
+                        print(f"      dsShiftGroups type: {type(ds_shift_groups)}")
+                        if isinstance(ds_shift_groups, list):
+                            shifts = ds_shift_groups
+                            print(f"      ✅ Found shifts as list in dsShiftGroups: {len(shifts)} items")
+                        elif isinstance(ds_shift_groups, dict):
+                            print(f"      dsShiftGroups dict keys: {list(ds_shift_groups.keys())}")
+                            # Might be nested further - check common keys
+                            shifts = (
+                                ds_shift_groups.get('shifts') or
+                                ds_shift_groups.get('data') or
+                                ds_shift_groups.get('items') or
+                                ds_shift_groups.get('ttShiftGroups') or
+                                []
+                            )
+                            # If still not found, check if it's a dict with array values
+                            if not shifts:
+                                for key, value in ds_shift_groups.items():
+                                    if isinstance(value, list) and value:
+                                        shifts = value
+                                        print(f"      ✅ Found shifts in pcOutDataSetString['dsShiftGroups']['{key}']: {len(shifts)} items")
+                                        break
+                                    elif isinstance(value, dict):
+                                        # Check one level deeper
+                                        for sub_key, sub_value in value.items():
+                                            if isinstance(sub_value, list) and sub_value:
+                                                shifts = sub_value
+                                                print(f"      ✅ Found shifts in pcOutDataSetString['dsShiftGroups']['{key}']['{sub_key}']: {len(shifts)} items")
+                                                break
+                                        if shifts:
+                                            break
         
         print(f"   Found {len(shifts)} shift(s) in API response")
         if shifts:
             print(f"   First shift data: {str(shifts[0])[:200]}...")
+            # DEBUG: Print structure of first shift
+            if isinstance(shifts[0], dict):
+                print(f"   First shift keys: {list(shifts[0].keys())[:20]}")
         
         if not shifts:
             print(f"    ⚠ No shifts in API response")
+            print(f"    🔍 DEBUG: Full response structure printed above - check where shifts might be located")
             return False
         
         # Step 3: Get first shift ID
         first_shift = shifts[0]
         shift_id = None
         if isinstance(first_shift, dict):
-            shift_id = first_shift.get('id', first_shift.get('shiftId', first_shift.get('_id', first_shift.get('shift_id'))))
+            # Try multiple possible field names for shift ID
+            shift_id = (
+                first_shift.get('shiftid') or  # Celayix uses lowercase 'shiftid'
+                first_shift.get('id') or
+                first_shift.get('shiftId') or
+                first_shift.get('_id') or
+                first_shift.get('shift_id') or
+                first_shift.get('ShiftID') or
+                first_shift.get('ShiftId')
+            )
             print(f"   Extracted shift_id: {shift_id}")
             print(f"   Full shift keys: {list(first_shift.keys())}")
         
@@ -410,6 +678,73 @@ async def try_book_shifts_hybrid(page, api_capture, end_date_str, dry_run=True, 
         # Step 4: Book via API with parallel attempts (maximum speed + success rate)
         elapsed = (time.monotonic() - start_time) * 1000
         print(f"    ⚡ Shift found via API in {elapsed:.1f}ms: ID={shift_id}")
+
+        # Display detailed shift information
+        print(f"\n    📋 SHIFT INFORMATION:")
+        print(f"    {'='*60}")
+        if isinstance(first_shift, dict):
+            # Common Celayix shift fields (case-insensitive lookup)
+            shift_info = {}
+            for key, value in first_shift.items():
+                key_lower = key.lower()
+                # Map common field names
+                if key_lower in ['shiftid', 'id', 'shift_id', '_id']:
+                    shift_info['Shift ID'] = value
+                elif key_lower in ['shdate', 'date', 'shiftdate', 'shift_date']:
+                    shift_info['Date'] = value
+                elif key_lower in ['tmstart', 'starttime', 'start_time', 'time_start', 'start']:
+                    shift_info['Start Time'] = value
+                elif key_lower in ['tmend', 'endtime', 'end_time', 'time_end', 'end']:
+                    shift_info['End Time'] = value
+                elif key_lower in ['location', 'loc', 'locationname', 'location_name']:
+                    shift_info['Location'] = value
+                elif key_lower in ['role', 'position', 'job', 'jobtitle', 'job_title', 'title']:
+                    shift_info['Role'] = value
+                elif key_lower in ['department', 'dept', 'departmentname', 'department_name']:
+                    shift_info['Department'] = value
+                elif key_lower in ['payrate', 'pay_rate', 'rate', 'hourlyrate', 'hourly_rate', 'wage']:
+                    shift_info['Pay Rate'] = value
+                elif key_lower in ['hours', 'duration', 'length']:
+                    shift_info['Hours'] = value
+                elif key_lower in ['shifttype', 'shift_type', 'type']:
+                    shift_info['Shift Type'] = value
+                elif key_lower in ['description', 'desc', 'notes']:
+                    shift_info['Description'] = value
+            
+            # Print mapped fields
+            for label, value in shift_info.items():
+                print(f"    {label:15}: {value}")
+            
+            # Print any remaining fields that weren't mapped
+            printed_keys = set()
+            for key in ['shiftid', 'id', 'shift_id', '_id', 'shdate', 'date', 'shiftdate', 'shift_date',
+                       'tmstart', 'starttime', 'start_time', 'time_start', 'start',
+                       'tmend', 'endtime', 'end_time', 'time_end', 'end',
+                       'location', 'loc', 'locationname', 'location_name',
+                       'role', 'position', 'job', 'jobtitle', 'job_title', 'title',
+                       'department', 'dept', 'departmentname', 'department_name',
+                       'payrate', 'pay_rate', 'rate', 'hourlyrate', 'hourly_rate', 'wage',
+                       'hours', 'duration', 'length', 'shifttype', 'shift_type', 'type',
+                       'description', 'desc', 'notes']:
+                printed_keys.add(key.lower())
+            
+            remaining_fields = {k: v for k, v in first_shift.items() if k.lower() not in printed_keys}
+            if remaining_fields:
+                print(f"\n    Additional Fields:")
+                for key, value in remaining_fields.items():
+                    # Truncate long values for readability
+                    value_str = str(value)
+                    if len(value_str) > 50:
+                        value_str = value_str[:47] + "..."
+                    print(f"    {key:15}: {value_str}")
+        else:
+            print(f"    Raw shift data: {first_shift}")
+        
+        print(f"    {'='*60}\n")
+
+        print(f"    ✅ Shift ID captured successfully: {shift_id}")
+        print(f"    🛑 Skipping booking (test mode)")
+        return True
         
         booking_success, booking_result = await book_via_api_parallel(
             session, api_capture, shift_id, num_attempts=parallel_attempts, dry_run=dry_run
@@ -449,8 +784,14 @@ async def capture_api_endpoints(page, api_capture):
     print("  → Performing test Find click to capture API endpoint...")
     await find_btn.click()
     
-    # Wait for requests to be captured
-    await asyncio.sleep(2)
+    # Wait for requests to be captured (increase wait time for reliability)
+    await asyncio.sleep(3)
+    
+    # Also wait for network to be idle
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except:
+        pass
     
     if api_capture.is_ready():
         print(f"\n{'='*80}")
@@ -590,10 +931,26 @@ async def parse_shifts(page):
     """
     shifts = []
 
-    card_selector = "div.cx-list-item.pointer-cursor"
-    cards = await page.query_selector_all(card_selector)
+    # Try multiple selectors for shift cards
+    card_selectors = [
+        "div.cx-list-item.pointer-cursor",
+        "div.cx-list-item[class*='pointer-cursor']",
+        ".cx-list-item.pointer-cursor",
+        ".cx-list-item[class*='pointer-cursor']",
+        "div.cx-list-item"  # Fallback: any cx-list-item
+    ]
+    
+    # Wait a bit for shifts to load after Find click
+    await asyncio.sleep(0.5)
+    
+    cards = []
+    for selector in card_selectors:
+        cards = await page.query_selector_all(selector)
+        if cards:
+            print(f"DEBUG: found {len(cards)} clickable shift cards using selector: {selector}")
+            break
+    
     if cards:
-        print(f"DEBUG: found {len(cards)} clickable shift cards")
         for i, card in enumerate(cards):
             contents = await card.query_selector_all(".cx-item-contents")
             text_parts = []
@@ -669,18 +1026,33 @@ async def parse_shifts(page):
 
 
 
-async def apply_end_date_and_find(page, days_ahead=6):
-    end = get_next_week_end(days_ahead)
-    end_str = format_celayix_date_short(end)
+async def apply_end_date_and_find(page, days_ahead=6, start_date=None, end_date=None):
+    """
+    Set start and end dates, then click Find
+    start_date: date object or None (defaults to today)
+    end_date: date object or None (defaults to today + days_ahead)
+    """
+    # Set end date (default to today + days_ahead if not provided)
+    if end_date is None:
+        end_date = get_next_week_end(days_ahead)
+    end_str = format_celayix_date_short(end_date)
 
-    # This will clear and type into the end-date box
+    # Set start date (default to today if not provided)
+    if start_date is None:
+        start_date = date.today()
+    start_str = format_celayix_date_short(start_date)
+
+    # Set start date
+    await page.fill('#selfschedule-startDate', start_str)
+    
+    # Set end date
     await page.fill('#selfschedule-endDate', end_str)
 
     # Click the Find button
     await page.click('button.cx-button[type="submit"]')
     await page.wait_for_load_state("networkidle")
 
-    print(f"Set end date to {end_str} and clicked Find")
+    print(f"Set start date to {start_str}, end date to {end_str} and clicked Find")
 
 
 async def wait_for_find_button_ready(page, timeout=15000):
@@ -700,7 +1072,7 @@ async def wait_for_find_button_ready(page, timeout=15000):
         return False
 
 
-async def test_full_flow_dummy(dry_run=True, max_cycles=5, target_time=None, click_before_seconds=5):
+async def test_full_flow_dummy(dry_run=True, max_cycles=5, target_time=None, click_before_seconds=5, start_date=None, end_date=None, days_ahead=6):
     """
     Simulates the COMPLETE automation flow using the dummy page:
     - Login
@@ -784,14 +1156,21 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5, target_time=None, cli
         print("  ✓ Navigation completed, self-schedule page loaded")
         await asyncio.sleep(3)  # Delay after navigating to self-schedule to see the page
         
-        # Step 4: Set end date (but don't click Find yet)
-        print("\nSTEP 4: Set End Date")
-        print("  → Setting end date...")
+        # Step 4: Set start and end dates (but don't click Find yet)
+        print("\nSTEP 4: Set Dates")
+        print("  → Setting dates...")
         await asyncio.sleep(1)  # Delay before setting date
-        end = get_next_week_end(6)
-        end_str = format_celayix_date_short(end)
+        # Use provided end_date or default to today + days_ahead
+        if end_date is None:
+            end_date = get_next_week_end(days_ahead)
+        end_str = format_celayix_date_short(end_date)
+        # Use provided start_date or default to today
+        if start_date is None:
+            start_date = date.today()
+        start_str = format_celayix_date_short(start_date)
+        await page.fill('#selfschedule-startDate', start_str)
         await page.fill('#selfschedule-endDate', end_str)
-        print(f"  ✓ End date set to {end_str}\n")
+        print(f"  ✓ Start date set to {start_str}, end date set to {end_str}\n")
 
         if target_time:
             # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
@@ -829,7 +1208,7 @@ async def test_full_flow_dummy(dry_run=True, max_cycles=5, target_time=None, cli
                     target_drop_datetime = parse_target_time(target_time)
                     booking_success = await try_book_shifts_hybrid(
                         page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
-                        parallel_attempts=5, target_drop_time=target_drop_datetime
+                        parallel_attempts=5, target_drop_time=target_drop_datetime, start_date_str=start_str
                     )
                 else:
                     # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
@@ -1183,7 +1562,7 @@ async def click_find_at_precise_time(page, target_time_str, click_before_seconds
     return True
 
 
-async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=2.1):
+async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=2.1, start_date=None, end_date=None):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
@@ -1197,12 +1576,19 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
         await page.wait_for_load_state("networkidle")
         print("  ✓ Setup complete\n")
 
-        # Step 2: Set end date (but don't click Find yet)
-        print("📅 SETTING END DATE")
-        end = get_next_week_end(days_ahead)
-        end_str = format_celayix_date_short(end)
+        # Step 2: Set start and end dates (but don't click Find yet)
+        print("📅 SETTING DATES")
+        # Use provided end_date or default to today + days_ahead
+        if end_date is None:
+            end_date = get_next_week_end(days_ahead)
+        end_str = format_celayix_date_short(end_date)
+        # Use provided start_date or default to today
+        if start_date is None:
+            start_date = date.today()
+        start_str = format_celayix_date_short(start_date)
+        await page.fill('#selfschedule-startDate', start_str)
         await page.fill('#selfschedule-endDate', end_str)
-        print(f"  ✓ End date set to {end_str}\n")
+        print(f"  ✓ Start date set to {start_str}, end date set to {end_str}\n")
 
         if target_time:
             # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
@@ -1240,7 +1626,7 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
                     target_drop_datetime = parse_target_time(target_time)
                     booking_success = await try_book_shifts_hybrid(
                         page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
-                        parallel_attempts=5, target_drop_time=target_drop_datetime
+                        parallel_attempts=5, target_drop_time=target_drop_datetime, start_date_str=start_str
                     )
                 else:
                     # OPTIMIZED: Start watching for shifts IMMEDIATELY (parallel waiting)
@@ -1256,25 +1642,91 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
         else:
             # Normal mode: continuous searching
             print("🔄 CONTINUOUS MODE")
+            
+            # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
+            api_capture = APIEndpointCapture()
+            hybrid_mode_available = False
+            
+            if AIOHTTP_AVAILABLE:
+                print("🔬 BOT COMPETITION: Attempting to capture API endpoints...")
+                hybrid_mode_available = await capture_api_endpoints(page, api_capture)
+                if hybrid_mode_available:
+                    print("  ✅ Bot competition mode enabled - using direct API calls (5-20ms)")
+                    print("  ✅ Parallel booking attempts for maximum success rate\n")
+                else:
+                    print("  ⚠ Bot competition mode unavailable - using Playwright-only (50-200ms)\n")
+            else:
+                print("  ⚠ aiohttp not installed - using Playwright-only mode (slower)\n")
+                print("  💡 Install with: pip install aiohttp for bot competition mode\n")
+            
             # Do initial search
             await page.click('button.cx-button[type="submit"]')
             await page.wait_for_load_state("networkidle")
-            await try_book_shifts(page, dry_run=dry_run)
+            
+            # Wait a bit for shifts to load and for endpoints to be captured
+            await asyncio.sleep(2)
+            
+            # Re-check if endpoints were captured after Find click (in case initial capture failed)
+            if not hybrid_mode_available and api_capture.is_ready():
+                print("  ✅ API endpoints captured after Find click - enabling bot competition mode!")
+                hybrid_mode_available = True
+            
+            # Wait for API cooldown (5 seconds) before making API calls
+            # The API has a 5-second rate limit, so we need to wait after clicking Find
+            if hybrid_mode_available:
+                print("  ⏳ Waiting 6 seconds for API cooldown (5s required + 1s buffer)...")
+                await asyncio.sleep(6)
+            
+            # Try bot competition mode if available, else fall back to Playwright
+            if hybrid_mode_available:
+                print("\n📋 BOT COMPETITION MODE: Using direct API calls...")
+                booking_success = await try_book_shifts_hybrid(
+                    page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
+                    parallel_attempts=5, start_date_str=start_str
+                )
+                if not booking_success:
+                    print("  → Falling back to Playwright mode...")
+                    await try_book_shifts(page, dry_run=dry_run)
+            else:
+                await try_book_shifts(page, dry_run=dry_run)
+        last_search_time = time.monotonic()
+
+        while True:
+            # enforce at least 10 seconds between searches
+            now = time.monotonic()
+            elapsed = now - last_search_time
+            min_gap = 11.0  # Celayix requirement
+
+            if elapsed < min_gap:
+                await asyncio.sleep((min_gap - elapsed) + 0.3)  # small safety buffer
+
+            await page.click('button.cx-button[type="submit"]')
+            await page.wait_for_load_state("networkidle")
             last_search_time = time.monotonic()
+            
+            # Wait a bit for shifts to load and for endpoints to be captured
+            await asyncio.sleep(2)
+            
+            # Re-check if endpoints were captured after Find click (in case initial capture failed)
+            if not hybrid_mode_available and api_capture.is_ready():
+                print("  ✅ API endpoints captured after Find click - enabling bot competition mode!")
+                hybrid_mode_available = True
+            
+            # Wait for API cooldown before making API calls (if using hybrid mode)
+            # Note: We already wait 11+ seconds between searches, but add extra safety buffer
+            if hybrid_mode_available:
+                print("  ⏳ Waiting 6 seconds for API cooldown...")
+                await asyncio.sleep(6)
 
-            while True:
-                # enforce at least 10 seconds between searches
-                now = time.monotonic()
-                elapsed = now - last_search_time
-                min_gap = 11.0  # Celayix requirement
-
-                if elapsed < min_gap:
-                    await asyncio.sleep((min_gap - elapsed) + 0.3)  # small safety buffer
-
-                await page.click('button.cx-button[type="submit"]')
-                await page.wait_for_load_state("networkidle")
-                last_search_time = time.monotonic()
-
+            # Try bot competition mode if available, else fall back to Playwright
+            if hybrid_mode_available:
+                booking_success = await try_book_shifts_hybrid(
+                    page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
+                    parallel_attempts=5, start_date_str=start_str
+                )
+                if not booking_success:
+                    await try_book_shifts(page, dry_run=dry_run)
+            else:
                 await try_book_shifts(page, dry_run=dry_run)
         
         # Keep browser open for a moment to see results (only in precise timing mode)
@@ -1298,6 +1750,9 @@ if __name__ == "__main__":
             target_time = None
             click_before_seconds = 2.1
             
+            start_date_str = None
+            end_date_str = None
+            days_ahead = 6
             for arg in sys.argv:
                 if arg.startswith("--cycles="):
                     try:
@@ -1311,6 +1766,19 @@ if __name__ == "__main__":
                         click_before_seconds = float(arg.split("=")[1])
                     except ValueError:
                         pass
+                elif arg.startswith("--start-date="):
+                    start_date_str = arg.split("=")[1]
+                elif arg.startswith("--end-date="):
+                    end_date_str = arg.split("=")[1]
+                elif arg.startswith("--days="):
+                    try:
+                        days_ahead = int(arg.split("=")[1])
+                    except ValueError:
+                        pass
+            
+            # Parse dates
+            start_date = parse_start_date(start_date_str) if start_date_str else None
+            end_date = parse_end_date(end_date_str, days_ahead) if end_date_str else None
             
             print(f"Running FULL FLOW test (simulates complete automation)")
             print(f"  - Dry run: {dry_run}")
@@ -1318,9 +1786,14 @@ if __name__ == "__main__":
                 print(f"  - Precise timing: {target_time} (click {click_before_seconds}s before)")
             else:
                 print(f"  - Max cycles: {max_cycles} (0 = infinite)")
+            if start_date:
+                print(f"  - Start date: {format_celayix_date_short(start_date)}")
+            if end_date:
+                print(f"  - End date: {format_celayix_date_short(end_date)}")
             print()
             asyncio.run(test_full_flow_dummy(dry_run=dry_run, max_cycles=max_cycles, 
-                                            target_time=target_time, click_before_seconds=click_before_seconds))
+                                            target_time=target_time, click_before_seconds=click_before_seconds,
+                                            start_date=start_date, end_date=end_date, days_ahead=days_ahead))
         else:
             # Simple test (just booking logic)
             cycles = 3
@@ -1343,6 +1816,8 @@ if __name__ == "__main__":
         days_ahead = 6
         target_time = None
         click_before_seconds = 2.1
+        start_date_str = None
+        end_date_str = None
         
         for arg in sys.argv[1:]:
             if arg.startswith("--days="):
@@ -1357,17 +1832,35 @@ if __name__ == "__main__":
                     click_before_seconds = float(arg.split("=")[1])
                 except ValueError:
                     pass
+            elif arg.startswith("--start-date="):
+                start_date_str = arg.split("=")[1]
+            elif arg.startswith("--end-date="):
+                end_date_str = arg.split("=")[1]
+        
+        # Parse dates
+        start_date = parse_start_date(start_date_str) if start_date_str else None
+        end_date = parse_end_date(end_date_str, days_ahead) if end_date_str else None
+        
         # Display mode info
         if target_time:
             print(f"🎯 PRECISE TIMING MODE")
             print(f"   Target time: {target_time}")
             print(f"   Click before: {click_before_seconds} seconds")
             print(f"   Dry run: {dry_run}")
+            if start_date:
+                print(f"   Start date: {format_celayix_date_short(start_date)}")
+            if end_date:
+                print(f"   End date: {format_celayix_date_short(end_date)}")
             print()
         else:
             print(f"Running in continuous mode (dry_run={dry_run})")
             print(f"💡 Use --time=HH:MM to enable precise timing mode")
+            if start_date:
+                print(f"   Start date: {format_celayix_date_short(start_date)}")
+            if end_date:
+                print(f"   End date: {format_celayix_date_short(end_date)}")
             print()
         
         asyncio.run(main_loop(dry_run=dry_run, interval_sec=15, days_ahead=days_ahead, 
-                              target_time=target_time, click_before_seconds=click_before_seconds))
+                              target_time=target_time, click_before_seconds=click_before_seconds,
+                              start_date=start_date, end_date=end_date))
