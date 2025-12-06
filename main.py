@@ -1935,7 +1935,7 @@ async def click_find_at_precise_time(page, target_time_str, click_before_seconds
     return True
 
 
-async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=2.1, start_date=None, end_date=None):
+async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None, click_before_seconds=2.1, start_date=None, end_date=None, force_playwright_only=False):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
@@ -1964,11 +1964,12 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
         print(f"  ✓ Start date set to {start_str}, end date set to {end_str}\n")
 
         if target_time:
-            # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
+            # Capture endpoints for future optimization, but don't use them if force_playwright_only is set
             api_capture = APIEndpointCapture()
             hybrid_mode_available = False
             
-            if AIOHTTP_AVAILABLE:
+            # Still capture endpoints even in playwright-only mode (for future optimization)
+            if AIOHTTP_AVAILABLE and not force_playwright_only:
                 print("🔬 BOT COMPETITION: Attempting to capture API endpoints...")
                 hybrid_mode_available = await capture_api_endpoints(page, api_capture)
                 if hybrid_mode_available:
@@ -1976,24 +1977,33 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
                     print("  ✅ Parallel booking attempts for maximum success rate\n")
                 else:
                     print("  ⚠ Bot competition mode unavailable - using Playwright-only (50-200ms)\n")
+            elif force_playwright_only:
+                # Still capture endpoints but don't use them
+                print("🔬 Capturing API endpoints (for future optimization, but using Playwright-only mode)...")
+                await capture_api_endpoints(page, api_capture)
+                print("  → Endpoints captured but will use Playwright for all operations\n")
             else:
                 print("  ⚠ aiohttp not installed - using Playwright-only mode (slower)\n")
                 print("  💡 Install with: pip install aiohttp for bot competition mode\n")
             
             # Precise timing mode: wait until target time, then click Find
-            print(f"🎯 PRECISE TIMING MODE (BOT COMPETITION OPTIMIZED)")
+            mode_label = "PLAYWRIGHT-ONLY" if force_playwright_only else "BOT COMPETITION OPTIMIZED"
+            print(f"🎯 PRECISE TIMING MODE ({mode_label})")
             print(f"   Target time (when shifts drop): {target_time}")
             print(f"   Will click 'Find' {click_before_seconds} seconds before")
             print(f"   Current time: {datetime.now().strftime('%H:%M:%S')}\n")
             
+            # Force Playwright if flag is set
+            use_api_for_find = hybrid_mode_available and not force_playwright_only
+            
             # Wait until the precise moment and click Find (or call API directly)
             success = await click_find_at_precise_time(
                 page, target_time, click_before_seconds, 
-                use_api=hybrid_mode_available, api_capture=api_capture, end_date_str=end_str
+                use_api=use_api_for_find, api_capture=api_capture, end_date_str=end_str
             )
             if success:
-                # BOT COMPETITION: Use direct API calls if available, else fall back to Playwright
-                if hybrid_mode_available:
+                # Force Playwright if flag is set
+                if hybrid_mode_available and not force_playwright_only:
                     print("\n📋 BOT COMPETITION MODE: Using direct API calls + parallel attempts...")
                     # Parse target_time to datetime for waiting
                     target_drop_datetime = parse_target_time(target_time)
@@ -2007,7 +2017,7 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
                     booking_success = await try_book_shifts_optimized(page, dry_run=dry_run, timeout=5000)
                 
                 if booking_success:
-                    print(f"\n✅ BOT COMPETITION BOOKING COMPLETED!")
+                    print(f"\n✅ BOOKING COMPLETED!")
                 else:
                     print(f"\n⚠ No shifts found in hot-drop window")
             else:
@@ -2016,11 +2026,11 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
             # Normal mode: continuous searching
             print("🔄 CONTINUOUS MODE")
             
-            # BOT COMPETITION: Try to capture API endpoints for direct HTTP calls
+            # Capture endpoints for future optimization, but don't use them if force_playwright_only is set
             api_capture = APIEndpointCapture()
             hybrid_mode_available = False
             
-            if AIOHTTP_AVAILABLE:
+            if AIOHTTP_AVAILABLE and not force_playwright_only:
                 print("🔬 BOT COMPETITION: Attempting to capture API endpoints...")
                 hybrid_mode_available = await capture_api_endpoints(page, api_capture)
                 if hybrid_mode_available:
@@ -2028,6 +2038,11 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
                     print("  ✅ Parallel booking attempts for maximum success rate\n")
                 else:
                     print("  ⚠ Bot competition mode unavailable - using Playwright-only (50-200ms)\n")
+            elif force_playwright_only:
+                # Still capture endpoints but don't use them
+                print("🔬 Capturing API endpoints (for future optimization, but using Playwright-only mode)...")
+                await capture_api_endpoints(page, api_capture)
+                print("  → Endpoints captured but will use Playwright for all operations\n")
             else:
                 print("  ⚠ aiohttp not installed - using Playwright-only mode (slower)\n")
                 print("  💡 Install with: pip install aiohttp for bot competition mode\n")
@@ -2042,8 +2057,8 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
             if booking_success:
                 print("  ✅ Booked the visible shift!")
             else:
-                # If Playwright didn't work, wait for API cooldown and try API
-                if hybrid_mode_available:
+                # If Playwright didn't work, wait for API cooldown and try API (only if not force_playwright_only)
+                if hybrid_mode_available and not force_playwright_only:
                     print("  ⏳ Playwright didn't work, waiting for API cooldown then trying API...")
                     await asyncio.sleep(6)
                     print("\n📋 BOT COMPETITION MODE: Using direct API calls...")
@@ -2068,7 +2083,8 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
                 await asyncio.sleep((min_gap - elapsed) + 0.3)  # small safety buffer
 
             # In hybrid mode, use API calls (NO Find click - API doesn't trigger page cooldown)
-            if hybrid_mode_available:
+            # But skip if force_playwright_only is set
+            if hybrid_mode_available and not force_playwright_only:
                 print("\n📋 BOT COMPETITION MODE: Using direct API calls (no Find click needed)...")
                 booking_success = await try_book_shifts_hybrid(
                     page, api_capture, end_str, dry_run=dry_run, timeout=5000, 
@@ -2106,7 +2122,8 @@ async def main_loop(dry_run=True, interval_sec=5, days_ahead=6, target_time=None
             await asyncio.sleep(2)
             
             # Re-check if endpoints were captured after Find click (in case initial capture failed)
-            if not hybrid_mode_available and api_capture.is_ready():
+            # But don't enable API mode if force_playwright_only is set
+            if not hybrid_mode_available and api_capture.is_ready() and not force_playwright_only:
                 print("  ✅ API endpoints captured after Find click - enabling bot competition mode!")
                 hybrid_mode_available = True
                 continue  # Skip Playwright booking, use API next time
@@ -2198,6 +2215,7 @@ if __name__ == "__main__":
     else:
         # Parse command line arguments for main loop
         dry_run = "--live" not in sys.argv
+        force_playwright_only = "--playwright-only" in sys.argv or "--pw-only" in sys.argv
         days_ahead = 6
         target_time = None
         click_before_seconds = 2.1
@@ -2232,6 +2250,8 @@ if __name__ == "__main__":
             print(f"   Target time: {target_time}")
             print(f"   Click before: {click_before_seconds} seconds")
             print(f"   Dry run: {dry_run}")
+            if force_playwright_only:
+                print(f"   Mode: PLAYWRIGHT-ONLY (endpoints captured for future optimization)")
             if start_date:
                 print(f"   Start date: {format_celayix_date_short(start_date)}")
             if end_date:
@@ -2239,7 +2259,10 @@ if __name__ == "__main__":
             print()
         else:
             print(f"Running in continuous mode (dry_run={dry_run})")
+            if force_playwright_only:
+                print(f"   Mode: PLAYWRIGHT-ONLY (endpoints captured for future optimization)")
             print(f"💡 Use --time=HH:MM to enable precise timing mode")
+            print(f"💡 Use --playwright-only to force Playwright mode (no API calls)")
             if start_date:
                 print(f"   Start date: {format_celayix_date_short(start_date)}")
             if end_date:
@@ -2248,4 +2271,4 @@ if __name__ == "__main__":
         
         asyncio.run(main_loop(dry_run=dry_run, interval_sec=15, days_ahead=days_ahead, 
                               target_time=target_time, click_before_seconds=click_before_seconds,
-                              start_date=start_date, end_date=end_date))
+                              start_date=start_date, end_date=end_date, force_playwright_only=force_playwright_only))
