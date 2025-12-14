@@ -50,7 +50,7 @@ def format_celayix_date_short(d: date) -> str:
 def parse_start_date(date_str: str = None) -> date:
     """
     Parse start date from MM/DD/YY format or default to today
-    Returns: date object
+    Returns: date objec
     """
     if date_str:
         try:
